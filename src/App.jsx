@@ -303,8 +303,38 @@ function loadBots() {
 }
 
 function saveBots(bots) {
-  const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>[k,v.serialize()]));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
+  try {
+    const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>{
+      const s = v.serialize();
+      // Q-table이 너무 크면 상위 2000개 항목만 유지
+      const keys = Object.keys(s.qtable);
+      if(keys.length > 2000) {
+        const trimmed = {};
+        keys.slice(-2000).forEach(k => { trimmed[k] = s.qtable[k]; });
+        s.qtable = trimmed;
+      }
+      return [k, s];
+    }));
+    const json = JSON.stringify(d);
+    localStorage.setItem(STORAGE_KEY, json);
+    return true;
+  } catch(e) {
+    console.error("저장 실패:", e);
+    // 용량 초과 시 qtable 비우고 재시도
+    try {
+      const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>{
+        const s = v.serialize();
+        s.qtable = {};
+        return [k, s];
+      }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
+      alert("저장 공간 부족으로 학습 데이터 일부가 초기화되었습니다. 이름과 학습 횟수는 유지됩니다.");
+      return true;
+    } catch(e2) {
+      alert("저장 실패: " + e2.message);
+      return false;
+    }
+  }
 }
 
 // ============================================================
