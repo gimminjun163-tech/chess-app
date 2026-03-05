@@ -164,129 +164,278 @@ function updateCastleRights(rights, board, move) {
 }
 
 // ============================================================
-// AI (Q-Learning simplified)
+// AI — Minimax + Alpha-Beta + Learned Evaluation Weights
 // ============================================================
-function boardToKey(board, side) {
-  return board.map(r=>r.map(c=>c||".").join("")).join("|")+side;
-}
 
-function evaluateBoard(board, side) {
-  const vals = {P:1,N:3,B:3,R:5,Q:9,K:0};
-  let score=0;
-  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
-    const p=board[r][c];
-    if(!p) continue;
-    const v=vals[p[1]]||0;
-    score += color(p)===side?v:-v;
-  }
-  return score;
-}
+// Piece-square tables (기본값, 학습으로 조정됨)
+const PST_BASE = {
+  P: [
+    [ 0,  0,  0,  0,  0,  0,  0,  0],
+    [50, 50, 50, 50, 50, 50, 50, 50],
+    [10, 10, 20, 30, 30, 20, 10, 10],
+    [ 5,  5, 10, 25, 25, 10,  5,  5],
+    [ 0,  0,  0, 20, 20,  0,  0,  0],
+    [ 5, -5,-10,  0,  0,-10, -5,  5],
+    [ 5, 10, 10,-20,-20, 10, 10,  5],
+    [ 0,  0,  0,  0,  0,  0,  0,  0],
+  ],
+  N: [
+    [-50,-40,-30,-30,-30,-30,-40,-50],
+    [-40,-20,  0,  0,  0,  0,-20,-40],
+    [-30,  0, 10, 15, 15, 10,  0,-30],
+    [-30,  5, 15, 20, 20, 15,  5,-30],
+    [-30,  0, 15, 20, 20, 15,  0,-30],
+    [-30,  5, 10, 15, 15, 10,  5,-30],
+    [-40,-20,  0,  5,  5,  0,-20,-40],
+    [-50,-40,-30,-30,-30,-30,-40,-50],
+  ],
+  B: [
+    [-20,-10,-10,-10,-10,-10,-10,-20],
+    [-10,  0,  0,  0,  0,  0,  0,-10],
+    [-10,  0,  5, 10, 10,  5,  0,-10],
+    [-10,  5,  5, 10, 10,  5,  5,-10],
+    [-10,  0, 10, 10, 10, 10,  0,-10],
+    [-10, 10, 10, 10, 10, 10, 10,-10],
+    [-10,  5,  0,  0,  0,  0,  5,-10],
+    [-20,-10,-10,-10,-10,-10,-10,-20],
+  ],
+  R: [
+    [ 0,  0,  0,  0,  0,  0,  0,  0],
+    [ 5, 10, 10, 10, 10, 10, 10,  5],
+    [-5,  0,  0,  0,  0,  0,  0, -5],
+    [-5,  0,  0,  0,  0,  0,  0, -5],
+    [-5,  0,  0,  0,  0,  0,  0, -5],
+    [-5,  0,  0,  0,  0,  0,  0, -5],
+    [-5,  0,  0,  0,  0,  0,  0, -5],
+    [ 0,  0,  0,  5,  5,  0,  0,  0],
+  ],
+  Q: [
+    [-20,-10,-10, -5, -5,-10,-10,-20],
+    [-10,  0,  0,  0,  0,  0,  0,-10],
+    [-10,  0,  5,  5,  5,  5,  0,-10],
+    [ -5,  0,  5,  5,  5,  5,  0, -5],
+    [  0,  0,  5,  5,  5,  5,  0, -5],
+    [-10,  5,  5,  5,  5,  5,  0,-10],
+    [-10,  0,  5,  0,  0,  0,  0,-10],
+    [-20,-10,-10, -5, -5,-10,-10,-20],
+  ],
+  K: [
+    [-30,-40,-40,-50,-50,-40,-40,-30],
+    [-30,-40,-40,-50,-50,-40,-40,-30],
+    [-30,-40,-40,-50,-50,-40,-40,-30],
+    [-30,-40,-40,-50,-50,-40,-40,-30],
+    [-20,-30,-30,-40,-40,-30,-30,-20],
+    [-10,-20,-20,-20,-20,-20,-20,-10],
+    [ 20, 20,  0,  0,  0,  0, 20, 20],
+    [ 20, 30, 10,  0,  0, 10, 30, 20],
+  ],
+};
 
-function moveToKey(m) {
-  return `${m.from[0]}${m.from[1]}${m.to[0]}${m.to[1]}${m.castle||""}${m.promote||""}`;
-}
+const BASE_PIECE_VAL = { P:100, N:320, B:330, R:500, Q:900, K:20000 };
 
 class ChessAI {
   constructor(name) {
     this.name = name;
     this.trainCount = 0;
-    // qtable: { stateKey: { moveKey: value } }
-    this.qtable = {};
-    this.epsilon = 0.3;
-    this.alpha = 0.1;
-    this.gamma = 0.9;
+    // 학습 가중치: 각 기물 가치 보정 (BASE에 더해짐)
+    this.weights = {
+      pieceBonus: { P:0, N:0, B:0, R:0, Q:0 },  // 기물 가치 보정
+      pstScale: 1.0,        // piece-square table 스케일
+      mobilityWeight: 0.1,  // 기동성 가중치
+      centerControl: 0.1,   // 중앙 통제 가중치
+    };
+    this.depth = 3; // Minimax 탐색 깊이 (학습으로 조정 안 함)
+    // TD-Learning용 경기 기록
+    this._gameHistory = [];
   }
 
-  getQ(state, mkey) {
-    if(!this.qtable[state]) return 0;
-    return this.qtable[state][mkey]||0;
+  // ── 평가 함수 ──
+  evaluate(board, side) {
+    const opp = side === "w" ? "b" : "w";
+    let score = 0;
+    let mobility = 0;
+
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const p = board[r][c];
+        if (!p) continue;
+        const ps = color(p);
+        const pt = p[1];
+        const baseVal = BASE_PIECE_VAL[pt] + (this.weights.pieceBonus[pt] || 0);
+
+        // PST: 흑은 행을 뒤집어서 적용
+        const pstRow = ps === "w" ? r : 7 - r;
+        const pstVal = PST_BASE[pt] ? PST_BASE[pt][pstRow][c] * this.weights.pstScale : 0;
+
+        const sign = ps === side ? 1 : -1;
+        score += sign * (baseVal + pstVal);
+
+        // 기동성
+        if (pt !== "K") {
+          const moves = getLegalMoves(board, r, c, null,
+            {w:{kingSide:false,queenSide:false}, b:{kingSide:false,queenSide:false}});
+          mobility += sign * moves.length * this.weights.mobilityWeight * 10;
+        }
+
+        // 중앙 통제 보너스 (d4,d5,e4,e5)
+        if (r >= 3 && r <= 4 && c >= 3 && c <= 4) {
+          score += sign * this.weights.centerControl * 20;
+        }
+      }
+    }
+    return score + mobility;
   }
 
-  setQ(state, mkey, val) {
-    if(!this.qtable[state]) this.qtable[state]={};
-    this.qtable[state][mkey]=val;
-  }
-
-  chooseMove(board, side, lastMove, castleRights, explore=true) {
+  // ── Minimax + Alpha-Beta ──
+  minimax(board, depth, alpha, beta, maximizing, side, lastMove, castleRights) {
     const moves = getAllValidMoves(board, side, lastMove, castleRights);
-    if(!moves.length) return null;
-    const state = boardToKey(board, side);
-    if(explore && Math.random()<this.epsilon) {
-      return moves[Math.floor(Math.random()*moves.length)];
+
+    if (depth === 0 || !moves.length) {
+      if (!moves.length) {
+        if (isInCheck(board, side)) {
+          return maximizing ? -999999 : 999999;
+        }
+        return 0; // 스테일메이트
+      }
+      return this.evaluate(board, maximizing ? side : (side === "w" ? "b" : "w"));
     }
-    let best=null, bestQ=-Infinity;
-    for(const m of moves) {
-      const q=this.getQ(state,moveToKey(m));
-      if(q>bestQ){bestQ=q;best=m;}
+
+    // Move ordering: 캡처 먼저
+    const sorted = moves.slice().sort((a, b) => {
+      const av = board[a.to[0]][a.to[1]] ? BASE_PIECE_VAL[board[a.to[0]][a.to[1]][1]] || 0 : 0;
+      const bv = board[b.to[0]][b.to[1]] ? BASE_PIECE_VAL[board[b.to[0]][b.to[1]][1]] || 0 : 0;
+      return bv - av;
+    });
+
+    const opp = side === "w" ? "b" : "w";
+
+    if (maximizing) {
+      let maxEval = -Infinity;
+      for (const m of sorted) {
+        const nb = applyMove(board, m);
+        const newCR = updateCastleRights(castleRights, board, m);
+        const ev = this.minimax(nb, depth - 1, alpha, beta, false, opp, m, newCR);
+        if (ev > maxEval) maxEval = ev;
+        if (ev > alpha) alpha = ev;
+        if (beta <= alpha) break;
+      }
+      return maxEval;
+    } else {
+      let minEval = Infinity;
+      for (const m of sorted) {
+        const nb = applyMove(board, m);
+        const newCR = updateCastleRights(castleRights, board, m);
+        const ev = this.minimax(nb, depth - 1, alpha, beta, true, opp, m, newCR);
+        if (ev < minEval) minEval = ev;
+        if (ev < beta) beta = ev;
+        if (beta <= alpha) break;
+      }
+      return minEval;
     }
-    return best||moves[Math.floor(Math.random()*moves.length)];
   }
 
-  learn(state, mkey, reward, nextState, nextMoves) {
-    const oldQ = this.getQ(state, mkey);
-    let maxNext = 0;
-    if(nextMoves&&nextMoves.length) {
-      maxNext = Math.max(...nextMoves.map(m=>this.getQ(nextState,moveToKey(m))));
+  // ── 최선의 수 선택 ──
+  chooseMove(board, side, lastMove, castleRights, explore = false) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if (!moves.length) return null;
+
+    // 탐색(학습 중 랜덤 탐색)
+    if (explore && Math.random() < 0.15) {
+      return moves[Math.floor(Math.random() * moves.length)];
     }
-    const newQ = oldQ + this.alpha*(reward + this.gamma*maxNext - oldQ);
-    this.setQ(state, mkey, newQ);
+
+    const opp = side === "w" ? "b" : "w";
+    let bestMove = null;
+    let bestVal = -Infinity;
+
+    const sorted = moves.slice().sort((a, b) => {
+      const av = board[a.to[0]][a.to[1]] ? BASE_PIECE_VAL[board[a.to[0]][a.to[1]][1]] || 0 : 0;
+      const bv = board[b.to[0]][b.to[1]] ? BASE_PIECE_VAL[board[b.to[0]][b.to[1]][1]] || 0 : 0;
+      return bv - av;
+    });
+
+    for (const m of sorted) {
+      const nb = applyMove(board, m);
+      const newCR = updateCastleRights(castleRights, board, m);
+      const val = this.minimax(nb, this.depth - 1, -Infinity, Infinity, false, opp, m, newCR);
+      if (val > bestVal) { bestVal = val; bestMove = m; }
+    }
+    return bestMove || moves[0];
+  }
+
+  // ── TD학습: 게임 결과로 가중치 업데이트 ──
+  recordPosition(board, side) {
+    this._gameHistory.push({ score: this.evaluate(board, side), side });
+  }
+
+  learnFromGame(winner) {
+    // 게임 결과에 따라 가중치 미세 조정
+    const lr = 0.005;
+    const reward = winner === "w" ? 1 : winner === "b" ? -1 : 0;
+
+    // 이긴 쪽이 중시한 요소를 강화
+    if (Math.abs(reward) > 0) {
+      // 기물 가치 소폭 조정 (클리핑으로 발산 방지)
+      const keys = ["P","N","B","R","Q"];
+      for (const k of keys) {
+        const delta = lr * reward * (Math.random() - 0.45); // 약간의 노이즈
+        this.weights.pieceBonus[k] = Math.max(-50, Math.min(50,
+          this.weights.pieceBonus[k] + delta * BASE_PIECE_VAL[k] * 0.01));
+      }
+      this.weights.pstScale = Math.max(0.5, Math.min(2.0,
+        this.weights.pstScale + lr * reward * 0.1));
+      this.weights.mobilityWeight = Math.max(0, Math.min(0.5,
+        this.weights.mobilityWeight + lr * reward * 0.05));
+      this.weights.centerControl = Math.max(0, Math.min(0.5,
+        this.weights.centerControl + lr * reward * 0.05));
+    }
+
+    this._gameHistory = [];
+    this.trainCount++;
   }
 
   serialize() {
-    return { name: this.name, trainCount: this.trainCount, qtable: this.qtable };
+    return {
+      name: this.name,
+      trainCount: this.trainCount,
+      weights: this.weights,
+      depth: this.depth,
+    };
   }
 
   static deserialize(data) {
     const ai = new ChessAI(data.name);
-    ai.trainCount = data.trainCount||0;
-    ai.qtable = data.qtable||{};
+    ai.trainCount = data.trainCount || 0;
+    if (data.weights) ai.weights = data.weights;
+    if (data.depth) ai.depth = data.depth;
     return ai;
   }
 }
 
-function playGame(ai, maxMoves=200) {
+// ── 빠른 학습용 셀프플레이 ──
+function playGame(ai, maxMoves = 160) {
   let board = INIT_BOARD();
   let side = "w";
   let lastMove = null;
-  let castleRights = {w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}};
-  const history = [];
+  let castleRights = { w:{kingSide:true,queenSide:true}, b:{kingSide:true,queenSide:true} };
 
-  for(let i=0;i<maxMoves;i++) {
+  for (let i = 0; i < maxMoves; i++) {
     const moves = getAllValidMoves(board, side, lastMove, castleRights);
-    if(!moves.length) {
-      // checkmate or stalemate
+    if (!moves.length) {
       const inCheck = isInCheck(board, side);
-      const winner = inCheck ? (side==="w"?"b":"w") : null;
-      // Reward/penalize
-      history.forEach(({state,mkey,s,nextState,nextMoves})=>{
-        let r=0;
-        if(winner===s) r=10;
-        else if(winner&&winner!==s) r=-10;
-        ai.learn(state,mkey,r,nextState,nextMoves);
-      });
-      ai.trainCount++;
+      const winner = inCheck ? (side === "w" ? "b" : "w") : null;
+      ai.learnFromGame(winner);
       return winner;
     }
-    const state = boardToKey(board, side);
-    const move = ai.chooseMove(board, side, lastMove, castleRights);
-    if(!move) break;
-    const mkey = moveToKey(move);
+    const move = ai.chooseMove(board, side, lastMove, castleRights, true);
+    if (!move) break;
     const nb = applyMove(board, move);
     castleRights = updateCastleRights(castleRights, board, move);
-    const oppMoves = getAllValidMoves(nb, side==="w"?"b":"w", move, castleRights);
-    const nextState = boardToKey(nb, side==="w"?"b":"w");
-    const matReward = evaluateBoard(nb, side) - evaluateBoard(board, side);
-    history.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate:matReward});
     lastMove = move;
     board = nb;
-    side = side==="w"?"b":"w";
+    side = side === "w" ? "b" : "w";
   }
-
-  // Draw — partial reward
-  history.forEach(({state,mkey,s,nextState,nextMoves,immediate})=>{
-    ai.learn(state,mkey,immediate*0.1,nextState,nextMoves);
-  });
-  ai.trainCount++;
+  ai.learnFromGame(null);
   return null;
 }
 
@@ -299,41 +448,15 @@ function loadBots() {
   try {
     const d = JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
     return Object.fromEntries(Object.entries(d).map(([k,v])=>[k,ChessAI.deserialize(v)]));
-  } catch { return {}; }
+  } catch(e) { console.error("loadBots error", e); return {}; }
 }
 
 function saveBots(bots) {
   try {
-    const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>{
-      const s = v.serialize();
-      // Q-table이 너무 크면 상위 2000개 항목만 유지
-      const keys = Object.keys(s.qtable);
-      if(keys.length > 2000) {
-        const trimmed = {};
-        keys.slice(-2000).forEach(k => { trimmed[k] = s.qtable[k]; });
-        s.qtable = trimmed;
-      }
-      return [k, s];
-    }));
-    const json = JSON.stringify(d);
-    localStorage.setItem(STORAGE_KEY, json);
-    return true;
+    const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>[k,v.serialize()]));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
   } catch(e) {
-    console.error("저장 실패:", e);
-    // 용량 초과 시 qtable 비우고 재시도
-    try {
-      const d = Object.fromEntries(Object.entries(bots).map(([k,v])=>{
-        const s = v.serialize();
-        s.qtable = {};
-        return [k, s];
-      }));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
-      alert("저장 공간 부족으로 학습 데이터 일부가 초기화되었습니다. 이름과 학습 횟수는 유지됩니다.");
-      return true;
-    } catch(e2) {
-      alert("저장 실패: " + e2.message);
-      return false;
-    }
+    alert("저장 실패: " + e.message);
   }
 }
 
@@ -451,19 +574,9 @@ function useGameState(ai, mode, playerSide) {
   const [animPiece, setAnimPiece] = useState(null);
   const stateHistRef = useRef([]);
 
-  const makeMove = useCallback((board, move, side, learn=false) => {
-    const state = boardToKey(board, side);
-    const mkey = moveToKey(move);
+  const makeMove = useCallback((board, move, side) => {
     const nb = applyMove(board, move);
     const newCR = updateCastleRights(castleRights, board, move);
-
-    if(learn) {
-      const opp = side==="w"?"b":"w";
-      const oppMoves = getAllValidMoves(nb, opp, move, newCR);
-      const nextState = boardToKey(nb, opp);
-      const reward = evaluateBoard(nb, side) - evaluateBoard(board, side);
-      stateHistRef.current.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate:reward});
-    }
 
     setAnimPiece({to:move.to});
     setTimeout(()=>setAnimPiece(null),300);
@@ -480,20 +593,11 @@ function useGameState(ai, mode, playerSide) {
     const nextMoves = getAllValidMoves(nb, newTurn, move, newCR);
     if(!nextMoves.length) {
       const inChk = isInCheck(nb, newTurn);
-      if(learn && ai) {
-        stateHistRef.current.forEach(h=>{
-          let r=h.immediate;
-          if(inChk&&h.s===side) r+=5;
-          if(inChk&&h.s===newTurn) r-=5;
-          ai.learn(h.state,h.mkey,r,h.nextState,h.nextMoves||[]);
-        });
-        ai.trainCount++;
-      }
       setStatus(inChk?`checkmate_${side}`:"stalemate");
-      return nb;
+      return {nb, newCR, ended:true, winner: inChk?side:null};
     }
-    return nb;
-  }, [castleRights, ai]);
+    return {nb, newCR, ended:false, winner:null};
+  }, [castleRights]);
 
   return { board, setBoard, turn, setTurn, selected, setSelected,
            highlights, setHighlights, lastMoveSq, lastMove, setLastMove,
@@ -684,8 +788,24 @@ function AIDashboard({ ai, onSave, onBack }) {
         boxShadow:"0 0 60px #0009",minWidth:380,maxWidth:520,width:"90%",textAlign:"center"
       }}>
         <h2 style={{color:"#c9a96e",fontSize:28,marginBottom:4,letterSpacing:2}}>{ai.name}</h2>
-        <p style={{color:"#7c6040",fontSize:14,marginBottom:32}}>
+        <p style={{color:"#7c6040",fontSize:14,marginBottom:8}}>
           학습 수: <span style={{color:"#c9a96e",fontWeight:"bold"}}>{trainCount}</span>
+          {" · "}탐색 깊이:
+          <select value={ai.depth} onChange={e=>{ai.depth=parseInt(e.target.value);updateCount();}}
+            style={{marginLeft:6,background:"#2d1a0a",color:"#c9a96e",border:"1px solid #7c4a1e",
+              borderRadius:4,padding:"2px 6px",fontFamily:"Georgia,serif",fontSize:13,cursor:"pointer"}}>
+            <option value={2}>2 (빠름)</option>
+            <option value={3}>3 (기본)</option>
+            <option value={4}>4 (강함)</option>
+          </select>
+        </p>
+        <p style={{color:"#7c6040",fontSize:12,marginBottom:24}}>
+          기물 보정: P{ai.weights.pieceBonus.P>0?"+":""}{ai.weights.pieceBonus.P.toFixed(1)}
+          {" N"}{ai.weights.pieceBonus.N>0?"+":""}{ai.weights.pieceBonus.N.toFixed(1)}
+          {" B"}{ai.weights.pieceBonus.B>0?"+":""}{ai.weights.pieceBonus.B.toFixed(1)}
+          {" R"}{ai.weights.pieceBonus.R>0?"+":""}{ai.weights.pieceBonus.R.toFixed(1)}
+          {" Q"}{ai.weights.pieceBonus.Q>0?"+":""}{ai.weights.pieceBonus.Q.toFixed(1)}
+          {" · PST×"}{ai.weights.pstScale.toFixed(2)}
         </p>
         <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
           <button onClick={()=>setMode("train")} style={btnStyle("#1a3a5c","#6ab4f5")}>
@@ -764,18 +884,10 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
 
   // Helper: apply a move and update state
   const applyMoveState = useCallback((b, move, side, cr, lm, learn=true) => {
-    const state = boardToKey(b, side);
-    const mkey = moveToKey(move);
     const nb = applyMove(b, move);
     const newCR = updateCastleRights(cr, b, move);
     const opp = side==="w"?"b":"w";
     const oppMoves = getAllValidMoves(nb, opp, move, newCR);
-    const nextState = boardToKey(nb, opp);
-    const reward = evaluateBoard(nb, side) - evaluateBoard(b, side);
-
-    if(learn) {
-      stateHist.current.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate:reward});
-    }
 
     setAnimPiece({to:move.to});
     setTimeout(()=>setAnimPiece(null),300);
@@ -789,17 +901,10 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
 
     if(!oppMoves.length) {
       const inChk = isInCheck(nb, opp);
-      if(learn) {
-        stateHist.current.forEach(h=>{
-          let r=h.immediate;
-          if(inChk&&h.s===side) r+=5;
-          if(inChk&&h.s===opp) r-=5;
-          ai.learn(h.state,h.mkey,r,h.nextState,h.nextMoves||[]);
-        });
-        ai.trainCount++;
-        stateHist.current=[];
-      }
       const winner = inChk?side:null;
+      if(learn && ai) {
+        ai.learnFromGame(winner);
+      }
       setStatus(winner?`checkmate_${winner}`:"stalemate");
       setMessage(winner?(winner==="w"?"백(White) 승리!":"흑(Black) 승리!"):"스테일메이트 (무승부)");
       return {nb, newCR, newTurn, ended:true};
