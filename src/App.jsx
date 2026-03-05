@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import ChessWorker from "./chess.worker.js?worker";
 
 // ============================================================
 // CHESS LOGIC
@@ -912,25 +913,45 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
     return {nb, newCR, newTurn, ended:false};
   }, [ai]);
 
-  // === TRAIN MODE (no display, fast) ===
+  // === TRAIN MODE (Web Worker — non-blocking, runs in background) ===
   useEffect(()=>{
     if(mode!=="train") return;
-    runRef.current=true;
-    let frameId;
+    const worker = new ChessWorker();
 
-    const runBatch = ()=>{
-      if(!runRef.current) return;
-      for(let i=0;i<50;i++){
-        playGame(ai);
-        trainBatch.current++;
+    worker.onmessage = (e) => {
+      const { type, trainCount, weights, ai: aiData } = e.data;
+      if (type === "progress") {
+        ai.trainCount = trainCount;
+        if (weights) ai.weights = weights;
+        setTrainDisplay(trainCount);
+        onTrainUpdate();
       }
-      setTrainDisplay(ai.trainCount);
-      onTrainUpdate();
-      frameId=requestAnimationFrame(runBatch);
+      if (type === "done" || type === "weights") {
+        if (aiData) {
+          ai.trainCount = aiData.trainCount;
+          ai.weights = aiData.weights;
+        }
+        setTrainDisplay(ai.trainCount);
+        onTrainUpdate();
+      }
     };
-    frameId=requestAnimationFrame(runBatch);
-    return ()=>{runRef.current=false;cancelAnimationFrame(frameId);};
-  },[mode,ai,onTrainUpdate]);
+
+    worker.postMessage({ type: "init", data: { ai: ai.serialize() } });
+
+    return () => {
+      worker.postMessage({ type: "stop" });
+      // Apply final weights when stopping
+      worker.onmessage = (e) => {
+        if (e.data.type === "done" && e.data.ai) {
+          ai.trainCount = e.data.ai.trainCount;
+          ai.weights = e.data.ai.weights;
+          onTrainUpdate();
+        }
+        worker.terminate();
+      };
+      setTimeout(() => worker.terminate(), 2000);
+    };
+  },[mode, ai, onTrainUpdate]);
 
   // === WATCH MODE ===
   useEffect(()=>{
@@ -1064,14 +1085,16 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
       {isTrain?(
         <div style={{
           background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
-          padding:"40px 60px",textAlign:"center",boxShadow:"0 0 40px #0008"
+          padding:"40px 60px",textAlign:"center",boxShadow:"0 0 40px #0008",minWidth:340
         }}>
           <div style={{fontSize:60,marginBottom:12,animation:"spin 2s linear infinite"}}>⚙️</div>
-          <p style={{color:"#c9a96e",fontSize:18,marginBottom:8}}>빠른 학습 중...</p>
-          <p style={{color:"#7c6040",fontSize:14}}>백그라운드에서 AI가 게임을 시뮬레이션하고 있습니다.</p>
-          <div style={{margin:"20px 0",fontSize:28,color:"#c9a96e",fontWeight:"bold"}}>{trainDisplay}</div>
-          <button onClick={onBack} style={btnStyle("#7c4a1e","#c9a96e")}>
-            학습 중단 및 돌아가기
+          <p style={{color:"#c9a96e",fontSize:18,marginBottom:4}}>백그라운드 학습 중</p>
+          <p style={{color:"#7c6040",fontSize:13,marginBottom:4}}>다른 탭을 봐도 학습이 계속됩니다.</p>
+          <p style={{color:"#7c6040",fontSize:13,marginBottom:16}}>Worker 스레드에서 Minimax 셀프플레이 진행 중</p>
+          <div style={{margin:"8px 0 24px",fontSize:36,color:"#c9a96e",fontWeight:"bold",
+            textShadow:"0 0 20px #c9a96e44"}}>{trainDisplay}<span style={{fontSize:16,color:"#7c6040",marginLeft:6}}>회</span></div>
+          <button onClick={onBack} style={{...btnStyle("#7c4a1e","#c9a96e"),width:"100%"}}>
+            ■ 학습 중단 및 돌아가기
           </button>
           <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
         </div>
