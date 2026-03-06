@@ -104,8 +104,8 @@ function applyMove(board, move, promPiece="Q") {
   const side = color(piece);
   nb[tr][tc]=piece;
   nb[fr][fc]=null;
-  if(move.castle==="k"){nb[tr][fc-1]=side+"R";nb[tr][7]=null;}
-  if(move.castle==="q"){nb[tr][fc+1]=side+"R";nb[tr][0]=null;}
+  if(move.castle==="k"){nb[tr][tc-1]=side+"R";nb[tr][7]=null;}
+  if(move.castle==="q"){nb[tr][tc+1]=side+"R";nb[tr][0]=null;}
   if(move.enPassant){nb[fr][tc]=null;}
   if(move.promote){nb[tr][tc]=side+promPiece;}
   return nb;
@@ -134,9 +134,10 @@ function getValidMoves(board, r, c, lastMove, castleRights) {
     const nb=applyMove(board,m);
     if(isInCheck(nb,side)) return false;
     if(m.castle) {
+      // Cannot castle if king passes through an attacked square
       const midC = m.castle==="k"?5:3;
       const nb2=applyMove(board,{from:m.from,to:[m.from[0],midC]});
-      if(isInCheck(board,side)||isInCheck(nb2,side)) return false;
+      if(isInCheck(nb2,side)) return false;
     }
     return true;
   });
@@ -233,9 +234,120 @@ const PST_BASE = {
 
 const BASE_PIECE_VAL = { P:100, N:320, B:330, R:500, Q:900, K:20000 };
 
+// ============================================================
+// Q-TABLE AI
+// ============================================================
+function boardToKey(board, side) {
+  return board.map(r=>r.map(c=>c||".").join("")).join("|")+side;
+}
+function moveToKey(m) {
+  return `${m.from[0]}${m.from[1]}${m.to[0]}${m.to[1]}${m.castle||""}${m.promote||""}`;
+}
+function evalMaterial(board, side) {
+  const vals = {P:1,N:3,B:3,R:5,Q:9,K:0};
+  let score=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+    const p=board[r][c]; if(!p) continue;
+    score += color(p)===side ? (vals[p[1]]||0) : -(vals[p[1]]||0);
+  }
+  return score;
+}
+
+class QTableAI {
+  constructor(name) {
+    this.name = name;
+    this.type = "qtable";
+    this.trainCount = 0;
+    this.qtable = {};
+    this.epsilon = 0.3;
+    this.alpha = 0.1;
+    this.gamma = 0.9;
+    this.depth = 0; // unused, for compat
+  }
+  getQ(state, mkey) {
+    if(!this.qtable[state]) return 0;
+    return this.qtable[state][mkey]||0;
+  }
+  setQ(state, mkey, val) {
+    if(!this.qtable[state]) this.qtable[state]={};
+    this.qtable[state][mkey]=val;
+  }
+  chooseMove(board, side, lastMove, castleRights, explore=true) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) return null;
+    const state = boardToKey(board, side);
+    if(explore && Math.random()<this.epsilon)
+      return moves[Math.floor(Math.random()*moves.length)];
+    let best=null, bestQ=-Infinity;
+    for(const m of moves) {
+      const q=this.getQ(state,moveToKey(m));
+      if(q>bestQ){bestQ=q;best=m;}
+    }
+    return best||moves[Math.floor(Math.random()*moves.length)];
+  }
+  learnFromGame(winner, history) {
+    history.forEach(({state,mkey,s,nextState,nextMoves,immediate})=>{
+      const oldQ = this.getQ(state, mkey);
+      let maxNext = 0;
+      if(nextMoves&&nextMoves.length)
+        maxNext = Math.max(...nextMoves.map(m=>this.getQ(nextState,moveToKey(m))));
+      let reward = immediate*0.1;
+      if(winner===s) reward+=10;
+      else if(winner&&winner!==s) reward-=10;
+      const newQ = oldQ + this.alpha*(reward + this.gamma*maxNext - oldQ);
+      this.setQ(state, mkey, newQ);
+    });
+    this.trainCount++;
+  }
+  serialize() {
+    const keys = Object.keys(this.qtable);
+    const trimmed = {};
+    keys.slice(-2000).forEach(k=>{trimmed[k]=this.qtable[k];});
+    return { name:this.name, type:"qtable", trainCount:this.trainCount, qtable:trimmed, epsilon:this.epsilon };
+  }
+  static deserialize(data) {
+    const ai = new QTableAI(data.name);
+    ai.trainCount = data.trainCount||0;
+    ai.qtable = data.qtable||{};
+    if(data.epsilon) ai.epsilon = data.epsilon;
+    return ai;
+  }
+}
+
+function playGameQTable(ai, maxMoves=200) {
+  let board = INIT_BOARD(), side="w", lastMove=null;
+  let castleRights = {w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}};
+  const history = [];
+  for(let i=0;i<maxMoves;i++) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) {
+      const inCheck = isInCheck(board, side);
+      const winner = inCheck ? (side==="w"?"b":"w") : null;
+      ai.learnFromGame(winner, history);
+      return winner;
+    }
+    const state = boardToKey(board, side);
+    const move = ai.chooseMove(board, side, lastMove, castleRights, true);
+    if(!move) break;
+    const mkey = moveToKey(move);
+    const nb = applyMove(board, move);
+    const newCR = updateCastleRights(castleRights, board, move);
+    const opp = side==="w"?"b":"w";
+    const oppMoves = getAllValidMoves(nb, opp, move, newCR);
+    const nextState = boardToKey(nb, opp);
+    const immediate = evalMaterial(nb, side) - evalMaterial(board, side);
+    history.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate});
+    lastMove=move; board=nb; castleRights=newCR; side=opp;
+  }
+  ai.learnFromGame(null, history);
+  return null;
+}
+
+
 class ChessAI {
   constructor(name) {
     this.name = name;
+    this.type = "minimax";
     this.trainCount = 0;
     // 학습 가중치: 각 기물 가치 보정 (BASE에 더해짐)
     this.weights = {
@@ -397,6 +509,7 @@ class ChessAI {
   serialize() {
     return {
       name: this.name,
+      type: "minimax",
       trainCount: this.trainCount,
       weights: this.weights,
       depth: this.depth,
@@ -414,6 +527,7 @@ class ChessAI {
 
 // ── 빠른 학습용 셀프플레이 ──
 function playGame(ai, maxMoves = 160) {
+  if(ai.type==="qtable") return playGameQTable(ai, maxMoves);
   let board = INIT_BOARD();
   let side = "w";
   let lastMove = null;
@@ -551,8 +665,8 @@ function applyMove(board, move, promPiece="Q") {
   const side = color(piece);
   nb[tr][tc]=piece;
   nb[fr][fc]=null;
-  if(move.castle==="k"){nb[tr][fc-1]=side+"R";nb[tr][7]=null;}
-  if(move.castle==="q"){nb[tr][fc+1]=side+"R";nb[tr][0]=null;}
+  if(move.castle==="k"){nb[tr][tc-1]=side+"R";nb[tr][7]=null;}
+  if(move.castle==="q"){nb[tr][tc+1]=side+"R";nb[tr][0]=null;}
   if(move.enPassant){nb[fr][tc]=null;}
   if(move.promote){nb[tr][tc]=side+promPiece;}
   return nb;
@@ -581,9 +695,10 @@ function getValidMoves(board, r, c, lastMove, castleRights) {
     const nb=applyMove(board,m);
     if(isInCheck(nb,side)) return false;
     if(m.castle) {
+      // Cannot castle if king passes through an attacked square
       const midC = m.castle==="k"?5:3;
       const nb2=applyMove(board,{from:m.from,to:[m.from[0],midC]});
-      if(isInCheck(board,side)||isInCheck(nb2,side)) return false;
+      if(isInCheck(nb2,side)) return false;
     }
     return true;
   });
@@ -861,6 +976,7 @@ class ChessAI {
 
 // ── 빠른 학습용 셀프플레이 ──
 function playGame(ai, maxMoves = 160) {
+  if(ai.type==="qtable") return playGameQTable(ai, maxMoves);
   let board = INIT_BOARD();
   let side = "w";
   let lastMove = null;
@@ -887,6 +1003,59 @@ function playGame(ai, maxMoves = 160) {
 }
 
 
+// ── Q-Table support inside Worker ──
+function boardToKey(board, side) {
+  return board.map(r=>r.map(c=>c||".").join("")).join("|")+side;
+}
+function moveToKey(m) {
+  return String(m.from[0])+m.from[1]+m.to[0]+m.to[1]+(m.castle||"")+(m.promote||"");
+}
+function evalMaterial(board, side) {
+  const vals={P:1,N:3,B:3,R:5,Q:9,K:0};
+  let score=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){const p=board[r][c];if(!p)continue;score+=color(p)===side?(vals[p[1]]||0):-(vals[p[1]]||0);}
+  return score;
+}
+class QTableAI {
+  constructor(name){this.name=name;this.type="qtable";this.trainCount=0;this.qtable={};this.epsilon=0.3;this.alpha=0.1;this.gamma=0.9;this.depth=0;}
+  getQ(s,m){return (this.qtable[s]&&this.qtable[s][m])||0;}
+  setQ(s,m,v){if(!this.qtable[s])this.qtable[s]={};this.qtable[s][m]=v;}
+  chooseMove(board,side,lm,cr,explore=true){
+    const moves=getAllValidMoves(board,side,lm,cr);if(!moves.length)return null;
+    const state=boardToKey(board,side);
+    if(explore&&Math.random()<this.epsilon)return moves[Math.floor(Math.random()*moves.length)];
+    let best=null,bestQ=-Infinity;
+    for(const m of moves){const q=this.getQ(state,moveToKey(m));if(q>bestQ){bestQ=q;best=m;}}
+    return best||moves[0];
+  }
+  learnFromGame(winner,history){
+    (history||[]).forEach(({state,mkey,s,nextState,nextMoves,immediate})=>{
+      const oldQ=this.getQ(state,mkey);
+      let maxNext=0;if(nextMoves&&nextMoves.length)maxNext=Math.max(...nextMoves.map(m=>this.getQ(nextState,moveToKey(m))));
+      let reward=immediate*0.1;if(winner===s)reward+=10;else if(winner&&winner!==s)reward-=10;
+      this.setQ(state,mkey,oldQ+this.alpha*(reward+this.gamma*maxNext-oldQ));
+    });
+    this.trainCount++;
+  }
+  serialize(){const keys=Object.keys(this.qtable);const t={};keys.slice(-2000).forEach(k=>{t[k]=this.qtable[k];});return{name:this.name,type:"qtable",trainCount:this.trainCount,qtable:t,epsilon:this.epsilon};}
+  static deserialize(d){const ai=new QTableAI(d.name);ai.trainCount=d.trainCount||0;ai.qtable=d.qtable||{};if(d.epsilon)ai.epsilon=d.epsilon;return ai;}
+}
+function playGameQTable(ai,maxMoves=200){
+  let board=INIT_BOARD(),side="w",lastMove=null,castleRights={w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}};
+  const history=[];
+  for(let i=0;i<maxMoves;i++){
+    const moves=getAllValidMoves(board,side,lastMove,castleRights);
+    if(!moves.length){const inCheck=isInCheck(board,side);const winner=inCheck?(side==="w"?"b":"w"):null;ai.learnFromGame(winner,history);return winner;}
+    const state=boardToKey(board,side);const move=ai.chooseMove(board,side,lastMove,castleRights,true);if(!move)break;
+    const mkey=moveToKey(move);const nb=applyMove(board,move);const newCR=updateCastleRights(castleRights,board,move);
+    const opp=side==="w"?"b":"w";const oppMoves=getAllValidMoves(nb,opp,move,newCR);const nextState=boardToKey(nb,opp);
+    const immediate=evalMaterial(nb,side)-evalMaterial(board,side);
+    history.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate});
+    lastMove=move;board=nb;castleRights=newCR;side=opp;
+  }
+  ai.learnFromGame(null,history);return null;
+}
+
 // ── Worker message handler ──
 let workerAI = null;
 let running = false;
@@ -895,7 +1064,7 @@ self.onmessage = (e) => {
   const { type, data } = e.data;
 
   if (type === "init") {
-    workerAI = ChessAI.deserialize(data.ai);
+    workerAI = data.ai.type==="qtable" ? QTableAI.deserialize(data.ai) : ChessAI.deserialize(data.ai);
     running = true;
     runTraining();
   }
@@ -950,7 +1119,10 @@ const STORAGE_KEY = "chess_ai_bots";
 function loadBots() {
   try {
     const d = JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
-    return Object.fromEntries(Object.entries(d).map(([k,v])=>[k,ChessAI.deserialize(v)]));
+    return Object.fromEntries(Object.entries(d).map(([k,v])=>{
+      if(v.type==="qtable") return [k, QTableAI.deserialize(v)];
+      return [k, ChessAI.deserialize(v)];
+    }));
   } catch(e) { console.error("loadBots error", e); return {}; }
 }
 
@@ -1205,7 +1377,15 @@ function LoadScreen({ onBack, onSelect }) {
             onMouseLeave={e=>e.currentTarget.style.background="#2d1a0a"}
             >
               <span style={{fontSize:16}}>{n}</span>
-              <span style={{color:"#7c6040",fontSize:13}}>학습 {bots[n].trainCount}회</span>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{
+                  fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",letterSpacing:0.5,
+                  background: bots[n].type==="qtable"?"#1a3a5c":"#3a1a5c",
+                  color: bots[n].type==="qtable"?"#6ab4f5":"#c06af5",
+                  border: `1px solid ${bots[n].type==="qtable"?"#6ab4f544":"#c06af544"}`
+                }}>{bots[n].type==="qtable"?"Q-Table":"Minimax"}</span>
+                <span style={{color:"#7c6040",fontSize:13}}>학습 {bots[n].trainCount}회</span>
+              </div>
             </div>
           ))}
         </div>
@@ -1219,9 +1399,29 @@ function LoadScreen({ onBack, onSelect }) {
 
 // --- New AI Screen ---
 function NewAIScreen({ onBack, onCreate }) {
+  const [step, setStep] = useState("name"); // "name" | "type"
   const [name, setName] = useState("");
-  const bots = loadBots();
-  return (
+
+  const engineInfo = {
+    minimax: {
+      title: "Minimax + Alpha-Beta",
+      color: "#c06af5",
+      bg: "#3a1a5c",
+      icon: "🧠",
+      desc: "수 앞을 내다보며 최선의 수를 계산. 기본부터 강하고 학습으로 더 정교해짐.",
+      pros: ["학습 0회부터 합리적으로 둠", "수 탐색 깊이 조절 가능", "실제 체스 전략 구사"],
+    },
+    qtable: {
+      title: "Q-Table",
+      color: "#6ab4f5",
+      bg: "#1a3a5c",
+      icon: "📊",
+      desc: "경험을 표로 기억하며 학습. 많이 학습할수록 익숙한 국면에서 강해짐.",
+      pros: ["학습 데이터가 명시적으로 쌓임", "특정 패턴에 특화 가능", "단순하고 직관적"],
+    },
+  };
+
+  if(step==="name") return (
     <div style={{
       minHeight:"100vh",display:"flex",flexDirection:"column",
       alignItems:"center",justifyContent:"center",
@@ -1239,17 +1439,13 @@ function NewAIScreen({ onBack, onCreate }) {
         <input
           value={name}
           onChange={e=>setName(e.target.value)}
-          onKeyDown={e=>e.key==="Enter"&&name.trim()&&onCreate(name.trim())}
+          onKeyDown={e=>e.key==="Enter"&&name.trim()&&setStep("type")}
           placeholder="AI 이름 입력..."
           style={{
             width:"100%",padding:"12px 16px",
-            background:"#2d1a0a",
-            border:"1px solid #7c4a1e",
-            borderRadius:6,
-            color:"#c9a96e",fontSize:16,
-            fontFamily:"Georgia,serif",
-            boxSizing:"border-box",
-            outline:"none",marginBottom:16
+            background:"#2d1a0a",border:"1px solid #7c4a1e",borderRadius:6,
+            color:"#c9a96e",fontSize:16,fontFamily:"Georgia,serif",
+            boxSizing:"border-box",outline:"none",marginBottom:16
           }}
           autoFocus
         />
@@ -1258,13 +1454,64 @@ function NewAIScreen({ onBack, onCreate }) {
             ← 뒤로
           </button>
           <button
-            onClick={()=>name.trim()&&onCreate(name.trim())}
+            onClick={()=>name.trim()&&setStep("type")}
             disabled={!name.trim()}
             style={{...btnStyle("#2d5a27","#7ec876"),flex:1,opacity:name.trim()?1:0.5}}
           >
-            만들기
+            다음 →
           </button>
         </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{
+      minHeight:"100vh",display:"flex",flexDirection:"column",
+      alignItems:"center",justifyContent:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",
+      fontFamily:"Georgia,serif",padding:"20px"
+    }}>
+      <div style={{
+        padding:"40px 48px",background:"#1a0e06",
+        border:"2px solid #7c4a1e",borderRadius:12,
+        boxShadow:"0 0 60px #0009",width:"90%",maxWidth:560,textAlign:"center"
+      }}>
+        <h2 style={{color:"#c9a96e",fontSize:22,marginBottom:4}}>AI 엔진 선택</h2>
+        <p style={{color:"#7c6040",fontSize:13,marginBottom:28}}>
+          <span style={{color:"#c9a96e"}}>{name}</span> 의 학습 방식을 선택하세요
+        </p>
+        <div style={{display:"flex",gap:16,marginBottom:28}}>
+          {Object.entries(engineInfo).map(([key, info])=>(
+            <div key={key} onClick={()=>onCreate(name.trim(), key)}
+              style={{
+                flex:1,padding:"24px 16px",
+                background:info.bg,
+                border:`2px solid ${info.color}44`,
+                borderRadius:10,cursor:"pointer",
+                transition:"all 0.2s",textAlign:"left",
+              }}
+              onMouseEnter={e=>{e.currentTarget.style.border=`2px solid ${info.color}`;e.currentTarget.style.transform="translateY(-2px)";}}
+              onMouseLeave={e=>{e.currentTarget.style.border=`2px solid ${info.color}44`;e.currentTarget.style.transform="translateY(0)";}}
+            >
+              <div style={{fontSize:32,marginBottom:8}}>{info.icon}</div>
+              <div style={{color:info.color,fontSize:13,fontWeight:"bold",marginBottom:8,letterSpacing:0.5}}>
+                {info.title}
+              </div>
+              <div style={{color:"#9a8060",fontSize:12,marginBottom:12,lineHeight:1.6}}>
+                {info.desc}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {info.pros.map((p,i)=>(
+                  <div key={i} style={{color:"#7c6040",fontSize:11}}>✓ {p}</div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={()=>setStep("name")} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>
+          ← 이름 다시 입력
+        </button>
       </div>
     </div>
   );
@@ -1290,26 +1537,44 @@ function AIDashboard({ ai, onSave, onBack }) {
         border:"2px solid #7c4a1e",borderRadius:12,
         boxShadow:"0 0 60px #0009",minWidth:380,maxWidth:520,width:"90%",textAlign:"center"
       }}>
-        <h2 style={{color:"#c9a96e",fontSize:28,marginBottom:4,letterSpacing:2}}>{ai.name}</h2>
-        <p style={{color:"#7c6040",fontSize:14,marginBottom:8}}>
-          학습 수: <span style={{color:"#c9a96e",fontWeight:"bold"}}>{trainCount}</span>
-          {" · "}탐색 깊이:
-          <select value={ai.depth} onChange={e=>{ai.depth=parseInt(e.target.value);updateCount();}}
-            style={{marginLeft:6,background:"#2d1a0a",color:"#c9a96e",border:"1px solid #7c4a1e",
-              borderRadius:4,padding:"2px 6px",fontFamily:"Georgia,serif",fontSize:13,cursor:"pointer"}}>
-            <option value={2}>2 (빠름)</option>
-            <option value={3}>3 (기본)</option>
-            <option value={4}>4 (강함)</option>
-          </select>
-        </p>
-        <p style={{color:"#7c6040",fontSize:12,marginBottom:24}}>
-          기물 보정: P{ai.weights.pieceBonus.P>0?"+":""}{ai.weights.pieceBonus.P.toFixed(1)}
-          {" N"}{ai.weights.pieceBonus.N>0?"+":""}{ai.weights.pieceBonus.N.toFixed(1)}
-          {" B"}{ai.weights.pieceBonus.B>0?"+":""}{ai.weights.pieceBonus.B.toFixed(1)}
-          {" R"}{ai.weights.pieceBonus.R>0?"+":""}{ai.weights.pieceBonus.R.toFixed(1)}
-          {" Q"}{ai.weights.pieceBonus.Q>0?"+":""}{ai.weights.pieceBonus.Q.toFixed(1)}
-          {" · PST×"}{ai.weights.pstScale.toFixed(2)}
-        </p>
+        <h2 style={{color:"#c9a96e",fontSize:28,marginBottom:6,letterSpacing:2}}>{ai.name}</h2>
+        <div style={{display:"inline-flex",alignItems:"center",gap:8,marginBottom:12}}>
+          <span style={{
+            fontSize:11,padding:"3px 10px",borderRadius:10,fontWeight:"bold",
+            background: ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
+            color: ai.type==="qtable"?"#6ab4f5":"#c06af5",
+            border: `1px solid ${ai.type==="qtable"?"#6ab4f566":"#c06af566"}`
+          }}>{ai.type==="qtable"?"📊 Q-Table":"🧠 Minimax + Alpha-Beta"}</span>
+          <span style={{color:"#7c6040",fontSize:13}}>학습 {trainCount}회</span>
+        </div>
+        {ai.type==="minimax"&&(
+          <p style={{color:"#7c6040",fontSize:13,marginBottom:4}}>
+            탐색 깊이:
+            <select value={ai.depth} onChange={e=>{ai.depth=parseInt(e.target.value);updateCount();}}
+              style={{marginLeft:6,background:"#2d1a0a",color:"#c9a96e",border:"1px solid #7c4a1e",
+                borderRadius:4,padding:"2px 6px",fontFamily:"Georgia,serif",fontSize:13,cursor:"pointer"}}>
+              <option value={2}>2 (빠름)</option>
+              <option value={3}>3 (기본)</option>
+              <option value={4}>4 (강함)</option>
+            </select>
+          </p>
+        )}
+        {ai.type==="minimax"&&ai.weights&&(
+          <p style={{color:"#7c6040",fontSize:11,marginBottom:20}}>
+            기물 보정: P{ai.weights.pieceBonus.P>0?"+":""}{ai.weights.pieceBonus.P.toFixed(1)}
+            {" N"}{ai.weights.pieceBonus.N>0?"+":""}{ai.weights.pieceBonus.N.toFixed(1)}
+            {" B"}{ai.weights.pieceBonus.B>0?"+":""}{ai.weights.pieceBonus.B.toFixed(1)}
+            {" R"}{ai.weights.pieceBonus.R>0?"+":""}{ai.weights.pieceBonus.R.toFixed(1)}
+            {" Q"}{ai.weights.pieceBonus.Q>0?"+":""}{ai.weights.pieceBonus.Q.toFixed(1)}
+            {" · PST×"}{ai.weights.pstScale.toFixed(2)}
+          </p>
+        )}
+        {ai.type==="qtable"&&(
+          <p style={{color:"#7c6040",fontSize:11,marginBottom:20}}>
+            Q-Table 항목 수: {Object.keys(ai.qtable||{}).length.toLocaleString()}개
+            {" · "}탐색율(ε): {(ai.epsilon*100).toFixed(0)}%
+          </p>
+        )}
         <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
           <button onClick={()=>setMode("train")} style={btnStyle("#1a3a5c","#6ab4f5")}>
             ⚡ AI vs. AI (관전 X) — 빠른 학습
@@ -1654,10 +1919,10 @@ export default function App() {
   const [bots, setBots] = useState(()=>loadBots());
 
   const handleLoad = (ai) => { setCurrentAI(ai); setScreen("dashboard"); };
-  const handleNew = (name) => {
+  const handleNew = (name, engineType="minimax") => {
     const existing = bots[name];
     if(existing){setCurrentAI(existing);setScreen("dashboard");return;}
-    const ai = new ChessAI(name);
+    const ai = engineType==="qtable" ? new QTableAI(name) : new ChessAI(name);
     setCurrentAI(ai);
     setScreen("dashboard");
   };
