@@ -1095,7 +1095,18 @@ function runTraining() {
   }
 
   // Report progress every batch
-  self.postMessage({ type: "progress", trainCount: workerAI.trainCount, weights: workerAI.weights });
+  const progressData = { type: "progress", trainCount: workerAI.trainCount };
+  if(workerAI.type === "qtable") {
+    // Q-table은 10배치마다 한 번만 전송 (무거운 데이터)
+    if(workerAI.trainCount % 50 === 0) {
+      progressData.qtable = workerAI.qtable;
+    }
+    progressData.aiType = "qtable";
+  } else {
+    progressData.weights = workerAI.weights;
+    progressData.aiType = "minimax";
+  }
+  self.postMessage(progressData);
 
   // Yield to allow stop messages, then continue
   if (running) {
@@ -1522,6 +1533,7 @@ function AIDashboard({ ai, onSave, onBack }) {
   const [mode, setMode] = useState(null); // "train","watch","pvp"
   const [playerSide, setPlayerSide] = useState("w");
   const [trainCount, setTrainCount] = useState(ai.trainCount);
+  const [depth, setDepth] = useState(ai.depth||3);
 
   const updateCount = useCallback(()=>setTrainCount(ai.trainCount),[ai]);
 
@@ -1550,7 +1562,7 @@ function AIDashboard({ ai, onSave, onBack }) {
         {ai.type==="minimax"&&(
           <p style={{color:"#7c6040",fontSize:13,marginBottom:4}}>
             탐색 깊이:
-            <select value={ai.depth} onChange={e=>{ai.depth=parseInt(e.target.value);updateCount();}}
+            <select value={depth} onChange={e=>{const d=parseInt(e.target.value);ai.depth=d;setDepth(d);}}
               style={{marginLeft:6,background:"#2d1a0a",color:"#c9a96e",border:"1px solid #7c4a1e",
                 borderRadius:4,padding:"2px 6px",fontFamily:"Georgia,serif",fontSize:13,cursor:"pointer"}}>
               <option value={2}>2 (빠름)</option>
@@ -1689,14 +1701,19 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
       const { type, trainCount, weights, ai: aiData } = e.data;
       if (type === "progress") {
         ai.trainCount = trainCount;
-        if (weights) ai.weights = weights;
+        if (e.data.aiType === "qtable" && e.data.qtable) {
+          ai.qtable = e.data.qtable;
+        } else if (e.data.weights) {
+          ai.weights = e.data.weights;
+        }
         setTrainDisplay(trainCount);
         onTrainUpdate();
       }
       if (type === "done" || type === "weights") {
         if (aiData) {
           ai.trainCount = aiData.trainCount;
-          ai.weights = aiData.weights;
+          if (aiData.type === "qtable") ai.qtable = aiData.qtable;
+          else ai.weights = aiData.weights;
         }
         setTrainDisplay(ai.trainCount);
         onTrainUpdate();
@@ -1711,7 +1728,8 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate }) {
       worker.onmessage = (e) => {
         if (e.data.type === "done" && e.data.ai) {
           ai.trainCount = e.data.ai.trainCount;
-          ai.weights = e.data.ai.weights;
+          if (e.data.ai.type === "qtable") ai.qtable = e.data.ai.qtable;
+          else ai.weights = e.data.ai.weights;
           onTrainUpdate();
         }
         worker.terminate();
