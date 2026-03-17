@@ -642,12 +642,14 @@ async function getLeaderboard() {
 // Bot CRUD via Supabase
 async function loadBotsFromDB(userId) {
   try {
-    const rows = await supaFetch(`/rest/v1/bots?user_id=eq.${userId}&select=*`);
+    const rows = await supaFetch(`/rest/v1/bots?user_id=eq.${userId}&select=*&order=updated_at.desc`);
     const result = {};
     for(const row of rows||[]) {
       const ai = row.type==="qtable" ? QTableAI.deserialize({...row.data, name:row.name, type:"qtable", trainCount:row.train_count})
         : ChessAI.deserialize({...row.data, name:row.name, type:"minimax", trainCount:row.train_count});
       ai._dbId = row.id;
+      ai._isShared = row.is_shared||false;
+      ai._sharedAt = row.shared_at;
       result[row.name] = ai;
     }
     return result;
@@ -669,6 +671,50 @@ async function saveBotToDB(userId, ai) {
     const rows = await supaFetch(`/rest/v1/bots`, {method:"POST", headers:{"Prefer":"return=representation"}, body:JSON.stringify(body)});
     if(rows?.[0]) ai._dbId = rows[0].id;
   }
+}
+
+// 봇 이름 변경
+async function renameBotInDB(dbId, newName) {
+  await supaFetch(`/rest/v1/bots?id=eq.${dbId}`, {method:"PATCH",
+    body:JSON.stringify({name:newName, updated_at:new Date().toISOString()})});
+}
+
+// 봇 삭제
+async function deleteBotFromDB(dbId) {
+  await supaFetch(`/rest/v1/bots?id=eq.${dbId}`, {method:"DELETE"});
+}
+
+// 공유 토글
+async function toggleShareBot(dbId, shared) {
+  await supaFetch(`/rest/v1/bots?id=eq.${dbId}`, {method:"PATCH",
+    body:JSON.stringify({is_shared:shared, shared_at:shared?new Date().toISOString():null})});
+}
+
+// 공유된 봇 목록 불러오기
+async function loadSharedBots() {
+  try {
+    const rows = await supaFetch(`/rest/v1/bots?is_shared=eq.true&select=id,name,type,train_count,data,user_id,shared_at&order=shared_at.desc&limit=50`);
+    return (rows||[]).map(row => {
+      const ai = row.type==="qtable"
+        ? QTableAI.deserialize({...row.data, name:row.name, type:"qtable", trainCount:row.train_count})
+        : ChessAI.deserialize({...row.data, name:row.name, type:"minimax", trainCount:row.train_count});
+      ai._dbId = row.id;
+      ai._ownerId = row.user_id;
+      ai._isShared = true;
+      ai._sharedAt = row.shared_at;
+      return ai;
+    });
+  } catch(e) { console.error("loadSharedBots", e); return []; }
+}
+
+// 리믹스: 공유된 봇을 내 것으로 복사
+async function remixBot(userId, sourceAi, newName) {
+  const ai = sourceAi.type==="qtable"
+    ? QTableAI.deserialize({...sourceAi.serialize(), name:newName})
+    : ChessAI.deserialize({...sourceAi.serialize(), name:newName});
+  ai.trainCount = sourceAi.trainCount;
+  await saveBotToDB(userId, ai);
+  return ai;
 }
 
 // Rating calculation (Elo)
@@ -1507,7 +1553,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
 // ============================================================
 
 // --- Home Screen ---
-function HomeScreen({ onLoad, onNew, onBack }) {
+function HomeScreen({ onLoad, onNew, onBack, onManage, onShared }) {
   return (
     <div style={{
       minHeight:"100vh",display:"flex",flexDirection:"column",
@@ -1530,6 +1576,8 @@ function HomeScreen({ onLoad, onNew, onBack }) {
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <button onClick={onLoad} style={btnStyle("#7c4a1e","#c9a96e")}>📂 불러오기</button>
           <button onClick={onNew} style={btnStyle("#2d5a27","#7ec876")}>✨ 새로운 AI 만들기</button>
+          <button onClick={onManage} style={btnStyle("#3a2a5c","#c06af5")}>📋 AI 목록 관리</button>
+          <button onClick={onShared} style={btnStyle("#1a3a2c","#6af5b0")}>🌐 공유된 AI 둘러보기</button>
           <button onClick={onBack} style={{...btnStyle("#2a1a0a","#7c6040"),fontSize:13}}>← 메인 메뉴</button>
         </div>
       </div>
@@ -1548,45 +1596,52 @@ function LoadScreen({ onBack, onSelect, bots }) {
       fontFamily:"Georgia,serif"
     }}>
       <div style={{
-        padding:"40px 60px",
+        padding:"40px 48px",
         background:"#1a0e06",
         border:"2px solid #7c4a1e",
         borderRadius:12,
         boxShadow:"0 0 60px #0009",
-        minWidth:360,maxWidth:500,width:"90%"
+        minWidth:360,maxWidth:520,width:"90%"
       }}>
         <h2 style={{color:"#c9a96e",fontSize:24,marginBottom:24,textAlign:"center",letterSpacing:2}}>
-          AI 목록
+          📂 불러오기
         </h2>
         {names.length===0&&(
           <p style={{color:"#7c6040",textAlign:"center"}}>저장된 AI가 없습니다.</p>
         )}
-        <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:24}}>
-          {names.map(n=>(
-            <div key={n} onClick={()=>onSelect(bots[n])} style={{
-              padding:"14px 20px",
-              background:"#2d1a0a",
-              border:"1px solid #7c4a1e44",
-              borderRadius:8,cursor:"pointer",
-              display:"flex",justifyContent:"space-between",alignItems:"center",
-              color:"#c9a96e",
-              transition:"background 0.15s",
-            }}
-            onMouseEnter={e=>e.currentTarget.style.background="#3d2a14"}
-            onMouseLeave={e=>e.currentTarget.style.background="#2d1a0a"}
-            >
-              <span style={{fontSize:16}}>{n}</span>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{
-                  fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",letterSpacing:0.5,
-                  background: bots[n].type==="qtable"?"#1a3a5c":"#3a1a5c",
-                  color: bots[n].type==="qtable"?"#6ab4f5":"#c06af5",
-                  border: `1px solid ${bots[n].type==="qtable"?"#6ab4f544":"#c06af544"}`
-                }}>{bots[n].type==="qtable"?"Q-Table":"Minimax"}</span>
-                <span style={{color:"#7c6040",fontSize:13}}>학습 {bots[n].trainCount}회</span>
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:24,maxHeight:400,overflowY:"auto"}}>
+          {names.map(n=>{
+            const ai = bots[n];
+            return (
+              <div key={n} onClick={()=>onSelect(ai)} style={{
+                padding:"12px 16px",background:"#2d1a0a",
+                border:`1px solid ${ai._isShared?"#6af5b044":"#7c4a1e44"}`,
+                borderRadius:8,cursor:"pointer",
+                display:"flex",justifyContent:"space-between",alignItems:"center",
+                color:"#c9a96e",transition:"background 0.15s",
+              }}
+              onMouseEnter={e=>e.currentTarget.style.background="#3d2a14"}
+              onMouseLeave={e=>e.currentTarget.style.background="#2d1a0a"}
+              >
+                <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                  <span style={{fontSize:15,fontWeight:"bold"}}>{n}</span>
+                  <span style={{color:"#7c6040",fontSize:11}}>학습 {ai.trainCount}회</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  <span style={{
+                    fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
+                    background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
+                    color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
+                    border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
+                  }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+                  {ai._isShared&&(
+                    <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
+                      background:"#1a3a2c",color:"#6af5b0",border:"1px solid #6af5b044"}}>🌐 공유중</span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>
           ← 뒤로
@@ -1716,8 +1771,209 @@ function NewAIScreen({ onBack, onCreate }) {
   );
 }
 
+// --- AI 목록 관리 Screen ---
+function AIManageScreen({ onBack, bots, isDemo, onRefresh, userId }) {
+  const [renaming, setRenaming] = useState(null); // bot name being renamed
+  const [newName, setNewName] = useState("");
+  const [loading, setLoading] = useState(null);
+  const names = Object.keys(bots||{});
+
+  const handleRename = async(oldName) => {
+    if(!newName.trim()||newName.trim()===oldName) { setRenaming(null); return; }
+    if(bots[newName.trim()]) { alert("이미 같은 이름의 AI가 있습니다."); return; }
+    setLoading(oldName);
+    try {
+      const ai = bots[oldName];
+      if(!isDemo && ai._dbId) await renameBotInDB(ai._dbId, newName.trim());
+      await onRefresh();
+    } catch(e) { alert("이름 변경 실패: "+e.message); }
+    setRenaming(null); setNewName(""); setLoading(null);
+  };
+
+  const handleDelete = async(name) => {
+    if(!confirm(`"${name}" AI를 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    setLoading(name);
+    try {
+      const ai = bots[name];
+      if(!isDemo && ai._dbId) await deleteBotFromDB(ai._dbId);
+      await onRefresh();
+    } catch(e) { alert("삭제 실패: "+e.message); }
+    setLoading(null);
+  };
+
+  const handleToggleShare = async(name) => {
+    const ai = bots[name];
+    if(isDemo) { alert("데모 계정은 AI를 공유할 수 없습니다."); return; }
+    if(!ai._dbId) { alert("먼저 AI를 저장해주세요."); return; }
+    setLoading(name);
+    try {
+      const newShared = !ai._isShared;
+      await toggleShareBot(ai._dbId, newShared);
+      await onRefresh();
+    } catch(e) { alert("공유 설정 실패: "+e.message); }
+    setLoading(null);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",
+      alignItems:"center",justifyContent:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20}}>
+      <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
+        padding:"32px 40px",width:"100%",maxWidth:560,boxShadow:"0 0 40px #0008"}}>
+        <h2 style={{color:"#c9a96e",fontSize:22,marginBottom:20,textAlign:"center"}}>📋 AI 목록 관리</h2>
+        {names.length===0&&<p style={{color:"#7c6040",textAlign:"center",marginBottom:20}}>저장된 AI가 없습니다.</p>}
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20,maxHeight:480,overflowY:"auto"}}>
+          {names.map(n=>{
+            const ai = bots[n];
+            const isLoading = loading===n;
+            return (
+              <div key={n} style={{background:"#2d1a0a",border:`1px solid ${ai._isShared?"#6af5b033":"#7c4a1e33"}`,
+                borderRadius:10,padding:"14px 16px"}}>
+                {/* Top row: name + badges */}
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                  {renaming===n ? (
+                    <input value={newName} onChange={e=>setNewName(e.target.value)}
+                      onKeyDown={e=>{if(e.key==="Enter")handleRename(n);if(e.key==="Escape"){setRenaming(null);setNewName("");}}}
+                      autoFocus
+                      style={{...inputStyle,margin:0,flex:1,fontSize:14,padding:"6px 10px"}}/>
+                  ) : (
+                    <span style={{color:"#c9a96e",fontSize:16,fontWeight:"bold",flex:1}}>{n}</span>
+                  )}
+                  <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
+                    background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
+                    color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
+                    border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
+                  }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+                  {ai._isShared&&<span style={{fontSize:10,padding:"2px 7px",borderRadius:10,
+                    background:"#1a3a2c",color:"#6af5b0",border:"1px solid #6af5b044",fontWeight:"bold"}}>🌐 공유중</span>}
+                </div>
+                {/* Stats row */}
+                <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+                  <span style={{color:"#7c6040",fontSize:12}}>학습 <span style={{color:"#c9a96e"}}>{ai.trainCount}</span>회</span>
+                  {ai.type==="minimax"&&<span style={{color:"#7c6040",fontSize:12}}>탐색깊이 <span style={{color:"#c9a96e"}}>{ai.depth||3}</span></span>}
+                  {ai._isShared&&ai._sharedAt&&(
+                    <span style={{color:"#7c6040",fontSize:12}}>공유일 <span style={{color:"#6af5b0"}}>{new Date(ai._sharedAt).toLocaleDateString("ko-KR")}</span></span>
+                  )}
+                </div>
+                {/* Action buttons */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {renaming===n ? (
+                    <>
+                      <button onClick={()=>handleRename(n)} disabled={isLoading}
+                        style={{...smallBtn("#2d5a27","#7ec876")}}>✓ 저장</button>
+                      <button onClick={()=>{setRenaming(null);setNewName("");}}
+                        style={{...smallBtn("#3d2208","#c9a96e")}}>✕ 취소</button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={()=>{setRenaming(n);setNewName(n);}} disabled={isLoading}
+                        style={smallBtn("#2d2a1a","#c9a96e")}>✏️ 이름 변경</button>
+                      {!isDemo&&(
+                        <button onClick={()=>handleToggleShare(n)} disabled={isLoading}
+                          style={smallBtn(ai._isShared?"#2a1a0a":"#1a3a2c",ai._isShared?"#e07070":"#6af5b0")}>
+                          {ai._isShared?"🔒 공유 취소":"🌐 공유"}
+                        </button>
+                      )}
+                      <button onClick={()=>handleDelete(n)} disabled={isLoading}
+                        style={smallBtn("#3a1a1a","#e07070")}>🗑️ 삭제</button>
+                    </>
+                  )}
+                  {isLoading&&<span style={{color:"#7c6040",fontSize:12,alignSelf:"center"}}>처리 중...</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>← 뒤로</button>
+      </div>
+    </div>
+  );
+}
+
+function smallBtn(bg, fg) {
+  return {padding:"5px 12px",background:bg,color:fg,border:`1px solid ${fg}44`,
+    borderRadius:6,fontSize:12,fontFamily:"Georgia,serif",cursor:"pointer",transition:"all 0.15s"};
+}
+
+// --- 공유된 AI 목록 Screen ---
+function SharedAIScreen({ onBack, onSelect, currentUserId, isDemo }) {
+  const [bots, setBots] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [remixing, setRemixing] = useState(null);
+
+  useEffect(()=>{
+    loadSharedBots().then(b=>{ setBots(b); setLoading(false); });
+  },[]);
+
+  const handleRemix = async(ai) => {
+    const name = prompt(`리믹스할 AI 이름을 입력하세요:`, `${ai.name}_copy`);
+    if(!name||!name.trim()) return;
+    setRemixing(ai._dbId);
+    try {
+      if(isDemo) {
+        // demo: save locally
+        const newAi = ai.type==="qtable"
+          ? QTableAI.deserialize({...ai.serialize(), name:name.trim()})
+          : ChessAI.deserialize({...ai.serialize(), name:name.trim()});
+        const local = loadBotsLocal();
+        local[name.trim()] = newAi;
+        saveBotsLocal(local);
+        alert("로컬에 저장되었습니다!");
+      } else {
+        await remixBot(currentUserId, ai, name.trim());
+        alert("내 AI 목록에 추가되었습니다!");
+      }
+    } catch(e) { alert("리믹스 실패: "+e.message); }
+    setRemixing(null);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",
+      alignItems:"center",justifyContent:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20}}>
+      <div style={{background:"#1a0e06",border:"2px solid #6af5b033",borderRadius:12,
+        padding:"32px 40px",width:"100%",maxWidth:580,boxShadow:"0 0 40px #0008"}}>
+        <h2 style={{color:"#6af5b0",fontSize:22,marginBottom:6,textAlign:"center"}}>🌐 공유된 AI</h2>
+        <p style={{color:"#7c6040",fontSize:13,marginBottom:20,textAlign:"center"}}>
+          다른 유저의 AI와 대전하거나 리믹스해 더 학습시킬 수 있습니다
+        </p>
+        {loading&&<p style={{color:"#7c6040",textAlign:"center"}}>불러오는 중...</p>}
+        {!loading&&bots.length===0&&<p style={{color:"#7c6040",textAlign:"center"}}>공유된 AI가 없습니다.</p>}
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20,maxHeight:480,overflowY:"auto"}}>
+          {bots.map((ai,i)=>(
+            <div key={i} style={{background:"#2d1a0a",border:"1px solid #6af5b022",borderRadius:10,padding:"14px 16px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                <span style={{color:"#c9a96e",fontSize:15,fontWeight:"bold",flex:1}}>{ai.name}</span>
+                <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
+                  background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
+                  color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
+                  border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
+                }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+              </div>
+              <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
+                <span style={{color:"#7c6040",fontSize:12}}>학습 <span style={{color:"#c9a96e"}}>{ai.trainCount}</span>회</span>
+                {ai.type==="minimax"&&<span style={{color:"#7c6040",fontSize:12}}>탐색깊이 <span style={{color:"#c9a96e"}}>{ai.depth||3}</span></span>}
+                {ai._sharedAt&&<span style={{color:"#7c6040",fontSize:12}}>공유일 <span style={{color:"#6af5b0"}}>{new Date(ai._sharedAt).toLocaleDateString("ko-KR")}</span></span>}
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={()=>onSelect(ai)}
+                  style={smallBtn("#1a3a5c","#6ab4f5")}>⚔️ 대전하기</button>
+                <button onClick={()=>handleRemix(ai)} disabled={remixing===ai._dbId}
+                  style={smallBtn("#1a3a2c","#6af5b0")}>
+                  {remixing===ai._dbId?"리믹스 중...":"🔀 리믹스"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>← 뒤로</button>
+      </div>
+    </div>
+  );
+}
+
 // --- AI Dashboard ---
-function AIDashboard({ ai, onSave, onBack, theme="wood" }) {
+function AIDashboard({ ai, onSave, onBack, theme="wood", isDemo=false, onToggleShare=()=>{} }) {
   const [mode, setMode] = useState(null); // "train","watch","pvp"
   const [playerSide, setPlayerSide] = useState("w");
   const [trainCount, setTrainCount] = useState(ai.trainCount);
@@ -1801,7 +2057,15 @@ function AIDashboard({ ai, onSave, onBack, theme="wood" }) {
             </button>
           </div>
         </div>
-        <div style={{display:"flex",gap:10}}>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          {!isDemo&&ai._dbId&&(
+            <button onClick={onToggleShare} style={{
+              ...btnStyle(ai._isShared?"#3a1a0a":"#1a3a2c", ai._isShared?"#e07070":"#6af5b0"),
+              flex:1,fontSize:13
+            }}>
+              {ai._isShared?"🔒 공유 취소":"🌐 공유하기"}
+            </button>
+          )}
           <button onClick={()=>{onSave(ai);}} style={{...btnStyle("#5a3a0a","#c9a96e"),flex:1}}>
             💾 저장 후 홈
           </button>
@@ -2190,19 +2454,24 @@ export default function App() {
 // AI Root — wraps old AI flow with DB support
 function AIRoot({ user, profile, onBack, theme }) {
   const isDemo = user==="demo";
-  const [screen, setScreen] = useState("home"); // home|load|new|dashboard
+  const [screen, setScreen] = useState("home"); // home|load|new|dashboard|manage|shared
   const [currentAI, setCurrentAI] = useState(null);
   const [bots, setBots] = useState({});
   const [loaded, setLoaded] = useState(false);
 
+  const refreshBots = async() => {
+    if(isDemo) { setBots({...loadBotsLocal()}); }
+    else { const b = await loadBotsFromDB(user.id); setBots(b); }
+  };
+
   useEffect(()=>{
     if(!loaded) {
-      if(isDemo) { setBots(loadBotsLocal()); setLoaded(true); }
-      else loadBotsFromDB(user.id).then(b=>{ setBots(b); setLoaded(true); });
+      refreshBots().then(()=>setLoaded(true));
     }
-  },[loaded, isDemo, user]);
+  },[loaded]);
 
   const handleLoad = (ai) => { setCurrentAI(ai); setScreen("dashboard"); };
+
   const handleNew = (name, engineType="minimax") => {
     const existing = bots[name];
     if(existing){ setCurrentAI(existing); setScreen("dashboard"); return; }
@@ -2210,6 +2479,7 @@ function AIRoot({ user, profile, onBack, theme }) {
     setCurrentAI(ai);
     setScreen("dashboard");
   };
+
   const handleSave = async(ai) => {
     const nb = {...bots, [ai.name]:ai};
     setBots(nb);
@@ -2218,16 +2488,66 @@ function AIRoot({ user, profile, onBack, theme }) {
     setScreen("home"); setCurrentAI(null);
   };
 
+  const handleToggleShare = async() => {
+    if(!currentAI||isDemo) return;
+    try {
+      const newShared = !currentAI._isShared;
+      await toggleShareBot(currentAI._dbId, newShared);
+      currentAI._isShared = newShared;
+      setBots(b=>({...b, [currentAI.name]:currentAI}));
+    } catch(e) { alert("공유 설정 실패: "+e.message); }
+  };
+
   if(!loaded) return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
       background:"#1a0e06",color:"#c9a96e",fontFamily:"Georgia,serif"}}>불러오는 중...</div>
   );
 
-  if(screen==="home") return <HomeScreen onLoad={()=>setScreen("load")} onNew={()=>setScreen("new")} onBack={onBack}/>;
+  if(screen==="home") return (
+    <HomeScreen
+      onLoad={()=>setScreen("load")}
+      onNew={()=>setScreen("new")}
+      onBack={onBack}
+      onManage={()=>setScreen("manage")}
+      onShared={()=>setScreen("shared")}
+    />
+  );
   if(screen==="load") return <LoadScreen onBack={()=>setScreen("home")} onSelect={handleLoad} bots={bots}/>;
   if(screen==="new") return <NewAIScreen onBack={()=>setScreen("home")} onCreate={handleNew}/>;
-  if(screen==="dashboard"&&currentAI) return (
-    <AIDashboard ai={currentAI} onSave={handleSave} onBack={()=>{ setScreen("home"); setCurrentAI(null); }} theme={theme}/>
+  if(screen==="manage") return (
+    <AIManageScreen
+      onBack={()=>{ refreshBots(); setScreen("home"); }}
+      bots={bots}
+      isDemo={isDemo}
+      userId={user?.id}
+      onRefresh={refreshBots}
+    />
   );
-  return <HomeScreen onLoad={()=>setScreen("load")} onNew={()=>setScreen("new")} onBack={onBack}/>;
+  if(screen==="shared") return (
+    <SharedAIScreen
+      onBack={()=>setScreen("home")}
+      onSelect={(ai)=>{ setCurrentAI(ai); setScreen("dashboard"); }}
+      currentUserId={user?.id}
+      isDemo={isDemo}
+    />
+  );
+  if(screen==="dashboard"&&currentAI) return (
+    <AIDashboard
+      ai={currentAI}
+      onSave={handleSave}
+      onBack={()=>{ setScreen("home"); setCurrentAI(null); }}
+      theme={theme}
+      isDemo={isDemo}
+      onToggleShare={handleToggleShare}
+    />
+  );
+  return (
+    <HomeScreen
+      onLoad={()=>setScreen("load")}
+      onNew={()=>setScreen("new")}
+      onBack={onBack}
+      onManage={()=>setScreen("manage")}
+      onShared={()=>setScreen("shared")}
+    />
+  );
 }
