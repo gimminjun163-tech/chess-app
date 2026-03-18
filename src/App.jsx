@@ -1611,7 +1611,7 @@ function LoadScreen({ onBack, onSelect, bots }) {
         )}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:24,maxHeight:400,overflowY:"auto"}}>
           {names.map(n=>{
-            const ai = bots[n];
+            const ai = localBots[n];
             return (
               <div key={n} onClick={()=>onSelect(ai)} style={{
                 padding:"12px 16px",background:"#2d1a0a",
@@ -1773,43 +1773,62 @@ function NewAIScreen({ onBack, onCreate }) {
 
 // --- AI 목록 관리 Screen ---
 function AIManageScreen({ onBack, bots, isDemo, onRefresh, userId }) {
-  const [renaming, setRenaming] = useState(null); // bot name being renamed
+  const [renaming, setRenaming] = useState(null);
   const [newName, setNewName] = useState("");
   const [loading, setLoading] = useState(null);
-  const names = Object.keys(bots||{});
+  const [localBots, setLocalBots] = useState(()=>({...bots}));
+  const names = Object.keys(localBots||{});
 
   const handleRename = async(oldName) => {
-    if(!newName.trim()||newName.trim()===oldName) { setRenaming(null); return; }
-    if(bots[newName.trim()]) { alert("이미 같은 이름의 AI가 있습니다."); return; }
+    const trimmed = newName.trim();
+    if(!trimmed || trimmed===oldName) { setRenaming(null); setNewName(""); return; }
+    if(localBots[trimmed]) { alert("이미 같은 이름의 AI가 있습니다."); return; }
     setLoading(oldName);
     try {
-      const ai = bots[oldName];
-      if(!isDemo && ai._dbId) await renameBotInDB(ai._dbId, newName.trim());
-      await onRefresh();
+      const ai = localBots[oldName];
+      if(!isDemo && ai._dbId) {
+        await renameBotInDB(ai._dbId, trimmed);
+      }
+      // Update locally regardless
+      const updated = {...localBots};
+      ai.name = trimmed;
+      updated[trimmed] = ai;
+      delete updated[oldName];
+      setLocalBots(updated);
+      if(isDemo) saveBotsLocal(updated);
+      onRefresh();
     } catch(e) { alert("이름 변경 실패: "+e.message); }
     setRenaming(null); setNewName(""); setLoading(null);
   };
 
   const handleDelete = async(name) => {
-    if(!confirm(`"${name}" AI를 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    if(!window.confirm(`"${name}" AI를 삭제할까요? 되돌릴 수 없습니다.`)) return;
     setLoading(name);
     try {
-      const ai = bots[name];
-      if(!isDemo && ai._dbId) await deleteBotFromDB(ai._dbId);
-      await onRefresh();
+      const ai = localBots[name];
+      if(!isDemo && ai._dbId) {
+        await deleteBotFromDB(ai._dbId);
+      }
+      const updated = {...localBots};
+      delete updated[name];
+      setLocalBots(updated);
+      if(isDemo) saveBotsLocal(updated);
+      onRefresh();
     } catch(e) { alert("삭제 실패: "+e.message); }
     setLoading(null);
   };
 
   const handleToggleShare = async(name) => {
-    const ai = bots[name];
+    const ai = localBots[name];
     if(isDemo) { alert("데모 계정은 AI를 공유할 수 없습니다."); return; }
     if(!ai._dbId) { alert("먼저 AI를 저장해주세요."); return; }
     setLoading(name);
     try {
       const newShared = !ai._isShared;
       await toggleShareBot(ai._dbId, newShared);
-      await onRefresh();
+      ai._isShared = newShared;
+      setLocalBots({...localBots, [name]: ai});
+      onRefresh();
     } catch(e) { alert("공유 설정 실패: "+e.message); }
     setLoading(null);
   };
