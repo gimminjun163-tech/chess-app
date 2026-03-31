@@ -165,6 +165,58 @@ function updateCastleRights(rights, board, move) {
 }
 
 // ============================================================
+// DRAW DETECTION
+// ============================================================
+
+// 기물 부족 무승부 (체크메이트 불가능한 기물 조합)
+function isInsufficientMaterial(board) {
+  const pieces = [];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+    const p = board[r][c];
+    if(p && p[1]!=="K") pieces.push({type:p[1], color:p[0], r, c});
+  }
+  // 기물이 0개: K vs K
+  if(pieces.length===0) return true;
+  // 기물 1개
+  if(pieces.length===1) {
+    const p = pieces[0];
+    if(p.type==="N"||p.type==="B") return true; // K+N vs K or K+B vs K
+  }
+  // 기물 2개: K+B vs K+B (같은 색 칸)
+  if(pieces.length===2) {
+    const [a,b] = pieces;
+    if(a.type==="B"&&b.type==="B") {
+      const sameSquareColor = (a.r+a.c)%2===(b.r+b.c)%2;
+      if(sameSquareColor) return true;
+    }
+  }
+  return false;
+}
+
+// 보드 해시 (3회 반복 감지용)
+function boardHash(board, turn, castleRights) {
+  const cr = castleRights;
+  return board.map(r=>r.map(c=>c||".").join("")).join("|")
+    +turn
+    +(cr.w.kingSide?"1":"0")+(cr.w.queenSide?"1":"0")
+    +(cr.b.kingSide?"1":"0")+(cr.b.queenSide?"1":"0");
+}
+
+// 무승부 이유 체크 (게임 상태 기반)
+function checkDrawReason(board, turn, castleRights, lastMove, positionHistory, halfMoveClock) {
+  // 스테일메이트: getAllValidMoves에서 처리됨 (호출부에서 판단)
+  // 기물 부족
+  if(isInsufficientMaterial(board)) return "기물 부족";
+  // 50수 규칙
+  if(halfMoveClock>=100) return "50수 규칙"; // half-move clock
+  // 3회 반복
+  const hash = boardHash(board, turn, castleRights);
+  const count = (positionHistory[hash]||0);
+  if(count>=3) return "3회 동형 반복";
+  return null;
+}
+
+// ============================================================
 // AI — Minimax + Alpha-Beta + Learned Evaluation Weights
 // ============================================================
 
@@ -724,6 +776,165 @@ function calcElo(ratingA, ratingB, resultA) {
   return Math.round(K * (resultA - expected));
 }
 
+// ============================================================
+// LEVEL SYSTEM
+// ============================================================
+const LEVELS = [
+  // Bronze
+  {tier:"Bronze",  num:1, min:0,    max:199,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:2, min:200,  max:399,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:3, min:400,  max:599,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:4, min:600,  max:799,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:5, min:800,  max:999,  color:"#cd7f32", bg:"#3a1a00"},
+  // Silver
+  {tier:"Silver",  num:1, min:1000, max:1099, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:2, min:1100, max:1199, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:3, min:1200, max:1299, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:4, min:1300, max:1399, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:5, min:1400, max:1499, color:"#aaaaaa", bg:"#2a2a2a"},
+  // Gold
+  {tier:"Gold",    num:1, min:1500, max:1599, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:2, min:1600, max:1699, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:3, min:1700, max:1799, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:4, min:1800, max:1899, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:5, min:1900, max:1999, color:"#ffd700", bg:"#3a2e00"},
+  // Platinum
+  {tier:"Platinum",num:1, min:2000, max:2099, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:2, min:2100, max:2199, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:3, min:2200, max:2299, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:4, min:2300, max:2399, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:5, min:2400, max:2499, color:"#00e5cc", bg:"#003a35"},
+  // Diamond
+  {tier:"Diamond", num:1, min:2500, max:2599, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:2, min:2600, max:2699, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:3, min:2700, max:2799, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:4, min:2800, max:2899, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:5, min:2900, max:2999, color:"#00bfff", bg:"#001a3a"},
+  // Ruby
+  {tier:"Ruby",    num:1, min:3000, max:3099, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:2, min:3100, max:3199, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:3, min:3200, max:3299, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:4, min:3300, max:3399, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:5, min:3400, max:3499, color:"#ff4466", bg:"#3a0010"},
+  // Max
+  {tier:"Max",     num:0, min:3500, max:Infinity, color:"#00c853", bg:"#003a15"},
+];
+
+function getLevel(rating) {
+  const r = rating||1200;
+  for(const l of LEVELS) if(r >= l.min && r <= l.max) return l;
+  return LEVELS[LEVELS.length-1];
+}
+
+function LevelBadge({ rating, size=14 }) {
+  const lv = getLevel(rating||1200);
+  const isMax = lv.tier==="Max";
+  return (
+    <span style={{
+      display:"inline-flex",alignItems:"center",justifyContent:"center",
+      background:lv.bg, color:lv.color,
+      border:`1px solid ${lv.color}66`,
+      borderRadius:4, padding:`1px ${size*0.4}px`,
+      fontSize:size, fontWeight:"bold", fontFamily:"monospace",
+      lineHeight:1.4, whiteSpace:"nowrap", flexShrink:0,
+    }}>
+      {isMax ? "M" : lv.num}
+      <span style={{fontSize:size*0.7, marginLeft:1, opacity:0.85}}>
+        {isMax ? "ax" : lv.tier.slice(0,2)}
+      </span>
+    </span>
+  );
+}
+
+function LevelInfo({ rating }) {
+  const lv = getLevel(rating||1200);
+  const isMax = lv.tier==="Max";
+  const nextMin = isMax ? null : LEVELS.find(l=>l.min > lv.max)?.min;
+  const toNext = nextMin ? nextMin - (rating||1200) : null;
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <LevelBadge rating={rating} size={16}/>
+      <div>
+        <span style={{color:lv.color,fontWeight:"bold",fontSize:15}}>
+          {isMax?"Max":`${lv.tier} ${lv.num}`}
+        </span>
+        {toNext&&<span style={{color:"#7c6040",fontSize:12,marginLeft:8}}>다음 레벨까지 {toNext}점</span>}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// RIVAL + SCHEDULED MATCH HELPERS
+// ============================================================
+async function getRivals(userId) {
+  // 내가 등록한 라이벌
+  const rows = await supaFetch(`/rest/v1/rivals?user_id=eq.${userId}&select=rival_id,profiles!rivals_rival_id_fkey(id,username,rating)`);
+  return (rows||[]).map(r=>r.profiles).filter(Boolean);
+}
+
+async function getReverseRivals(userId) {
+  // 나를 라이벌로 등록한 사람들
+  const rows = await supaFetch(`/rest/v1/rivals?rival_id=eq.${userId}&select=user_id,profiles!rivals_user_id_fkey(id,username,rating)`);
+  return (rows||[]).map(r=>r.profiles).filter(Boolean);
+}
+
+async function addRival(userId, rivalId) {
+  await supaFetch(`/rest/v1/rivals`, {method:"POST",
+    headers:{"Prefer":"return=minimal"},
+    body:JSON.stringify({user_id:userId, rival_id:rivalId})});
+}
+
+async function removeRival(userId, rivalId) {
+  await supaFetch(`/rest/v1/rivals?user_id=eq.${userId}&rival_id=eq.${rivalId}`, {method:"DELETE"});
+}
+
+async function isRival(userId, rivalId) {
+  const rows = await supaFetch(`/rest/v1/rivals?user_id=eq.${userId}&rival_id=eq.${rivalId}&select=id`);
+  return (rows||[]).length > 0;
+}
+
+async function searchProfiles(query) {
+  const rows = await supaFetch(`/rest/v1/profiles?username=ilike.*${encodeURIComponent(query)}*&select=id,username,rating&limit=10`);
+  return rows||[];
+}
+
+async function getProfileByUsername(username) {
+  const rows = await supaFetch(`/rest/v1/profiles?username=eq.${encodeURIComponent(username)}&select=*`);
+  return rows?.[0]||null;
+}
+
+async function getUserRank(userId) {
+  const rows = await supaFetch(`/rest/v1/profiles?select=id&order=rating.desc`);
+  if(!rows) return null;
+  const idx = rows.findIndex(r=>r.id===userId);
+  return idx>=0 ? idx+1 : null;
+}
+
+// Scheduled matches
+async function createScheduledMatch(creatorId, scheduledAt, note="") {
+  const rows = await supaFetch(`/rest/v1/scheduled_matches`, {
+    method:"POST", headers:{"Prefer":"return=representation"},
+    body:JSON.stringify({creator_id:creatorId, scheduled_at:scheduledAt, note, status:"open"})
+  });
+  return rows?.[0];
+}
+
+async function getOpenScheduledMatches() {
+  const rows = await supaFetch(`/rest/v1/scheduled_matches?status=eq.open&select=*,profiles!scheduled_matches_creator_id_fkey(username,rating)&order=scheduled_at.asc`);
+  return rows||[];
+}
+
+async function joinScheduledMatch(matchId, userId) {
+  await supaFetch(`/rest/v1/scheduled_matches?id=eq.${matchId}`, {method:"PATCH",
+    body:JSON.stringify({opponent_id:userId, status:"confirmed"})});
+}
+
+async function getMyScheduledMatches(userId) {
+  const rows = await supaFetch(`/rest/v1/scheduled_matches?or=(creator_id.eq.${userId},opponent_id.eq.${userId})&select=*,profiles!scheduled_matches_creator_id_fkey(username,rating)&order=scheduled_at.asc`);
+  return rows||[];
+}
+
 // Online room helpers
 async function createRoom(userId, mode, code=null) {
   const body = { white_id: userId, status:"waiting", mode, board: INIT_BOARD(), turn:"w",
@@ -1080,100 +1291,89 @@ function btnStyle(bg,fg) {
 // ============================================================
 // MAIN MENU (after login)
 // ============================================================
-function MainMenu({ user, profile, onAI, onPvPOffline, onPvPOnline, onLeaderboard, onLogout, theme, onThemeChange }) {
+function MainMenu({ user, profile, onAI, onPvPOffline, onPvPOnline, onLeaderboard, onLogout, theme, onThemeChange, onProfile }) {
   const isDemo = user==="demo";
-  const rankLabel = (r)=> r>=2000?"🏆 마스터":r>=1600?"💎 다이아몬드":r>=1400?"🥇 골드":r>=1200?"🥈 실버":"🥉 브론즈";
-
   return (
-    <div style={{
-      minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
-      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20
-    }}>
-      {/* Profile Card */}
-      <div style={{
-        background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20}}>
+      <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
         padding:"24px 40px",marginBottom:20,textAlign:"center",
-        boxShadow:"0 0 40px #0008",minWidth:360,maxWidth:480,width:"100%"
-      }}>
-        <div style={{fontSize:40,marginBottom:8}}>{isDemo?"👤":"♛"}</div>
-        <h2 style={{color:"#c9a96e",margin:"0 0 4px",fontSize:22,letterSpacing:1}}>
-          {isDemo?"데모 계정":profile?.username||"로딩 중..."}
-        </h2>
+        boxShadow:"0 0 40px #0008",minWidth:360,maxWidth:480,width:"100%"}}>
+        <div style={{fontSize:36,marginBottom:8}}>{isDemo?"👤":"♛"}</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:6}}>
+          {!isDemo&&profile&&<LevelBadge rating={profile.rating} size={15}/>}
+          <h2 style={{color:"#c9a96e",margin:0,fontSize:20,letterSpacing:1}}>
+            {isDemo?"데모 계정":profile?.username||"로딩 중..."}
+          </h2>
+        </div>
         {!isDemo&&profile&&(
-          <>
-            <div style={{color:"#c9a96e",fontSize:18,fontWeight:"bold",marginBottom:4}}>
-              {rankLabel(profile.rating)} {profile.rating}점
+          <div style={{marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:4}}>
+              <LevelInfo rating={profile.rating}/>
             </div>
             <div style={{color:"#7c6040",fontSize:13}}>
-              {profile.wins}승 {profile.losses}패 {profile.draws}무
+              {profile.rating}점 · {profile.wins}승 {profile.losses}패 {profile.draws}무
             </div>
-          </>
+            <button onClick={onProfile} style={{...smallBtn("#2d1a0a","#c9a96e"),marginTop:8,fontSize:12}}>
+              👤 내 프로필
+            </button>
+          </div>
         )}
         {isDemo&&<div style={{color:"#7c6040",fontSize:13}}>순위 없음 · 오프라인 전용</div>}
-
-        {/* Theme selector */}
-        <div style={{marginTop:16,display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+        <div style={{marginTop:12,display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
           {Object.entries(THEMES).map(([key,t])=>(
             <button key={key} onClick={()=>onThemeChange(key)}
-              style={{
-                padding:"6px 12px",fontSize:12,
+              style={{padding:"5px 10px",fontSize:11,
                 background:theme===key?"#7c4a1e":"#2d1a0a",
                 color:theme===key?"#c9a96e":"#7c6040",
                 border:`1px solid ${theme===key?"#c9a96e":"#7c4a1e44"}`,
-                borderRadius:20,cursor:"pointer",fontFamily:"Georgia,serif"
-              }}>{t.name}</button>
+                borderRadius:20,cursor:"pointer",fontFamily:"Georgia,serif"}}>{t.name}</button>
           ))}
         </div>
       </div>
-
-      {/* Buttons */}
       <div style={{display:"flex",flexDirection:"column",gap:12,width:"100%",maxWidth:360}}>
-        <button onClick={onAI} style={btnStyle("#1a3a5c","#6ab4f5")}>
-          🤖 AI 모드
-        </button>
-        <button onClick={onPvPOffline} style={btnStyle("#2d5a27","#7ec876")}>
-          ♟ Player vs Player (오프라인)
-        </button>
-        <button onClick={()=>isDemo?alert("온라인 대전은 계정이 필요합니다.\n회원가입 후 이용하세요!"):onPvPOnline()}
+        <button onClick={onAI} style={btnStyle("#1a3a5c","#6ab4f5")}>🤖 AI 모드</button>
+        <button onClick={onPvPOffline} style={btnStyle("#2d5a27","#7ec876")}>♟ Player vs Player (오프라인)</button>
+        <button onClick={()=>isDemo?alert("온라인 대전은 계정이 필요합니다!"):onPvPOnline()}
           style={{...btnStyle(isDemo?"#1a1a1a":"#5a1a5c",isDemo?"#444":"#e06af5"),opacity:isDemo?0.5:1}}>
           🌐 Player vs Player (온라인){isDemo?" 🔒":""}
         </button>
-        <button onClick={onLeaderboard} style={btnStyle("#3a2a0a","#c9a96e")}>
-          🏆 순위표
-        </button>
-        <button onClick={onLogout} style={{...btnStyle("#2a1a0a","#7c6040"),fontSize:13}}>
-          로그아웃
-        </button>
+        <button onClick={onLeaderboard} style={btnStyle("#3a2a0a","#c9a96e")}>🏆 순위표</button>
+        <button onClick={onLogout} style={{...btnStyle("#2a1a0a","#7c6040"),fontSize:13}}>로그아웃</button>
       </div>
     </div>
   );
 }
 
+
 // ============================================================
 // LEADERBOARD SCREEN
 // ============================================================
-function LeaderboardScreen({ onBack, currentProfile }) {
+function LeaderboardScreen({ onBack, currentProfile, onViewProfile }) {
   const [rows, setRows] = useState([]);
   useEffect(()=>{ getLeaderboard().then(d=>setRows(d||[])); },[]);
-  const rankLabel=(r)=>r>=2000?"🏆":r>=1600?"💎":r>=1400?"🥇":r>=1200?"🥈":"🥉";
   return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20}}>
       <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
-        padding:"32px 40px",width:"100%",maxWidth:500,boxShadow:"0 0 40px #0008"}}>
+        padding:"32px 40px",width:"100%",maxWidth:520,boxShadow:"0 0 40px #0008"}}>
         <h2 style={{color:"#c9a96e",textAlign:"center",fontSize:24,marginBottom:24,letterSpacing:2}}>🏆 순위표</h2>
         {rows.map((r,i)=>(
-          <div key={i} style={{
-            display:"flex",alignItems:"center",gap:12,padding:"10px 16px",marginBottom:6,
-            background:r.username===currentProfile?.username?"#2d1a0a":"#1a1208",
-            border:`1px solid ${r.username===currentProfile?.username?"#c9a96e":"#7c4a1e22"}`,
-            borderRadius:8,color:"#c9a96e"
-          }}>
-            <span style={{width:28,color:"#7c6040",fontSize:14}}>{i+1}</span>
-            <span style={{fontSize:16}}>{rankLabel(r.rating)}</span>
-            <span style={{flex:1,fontSize:15}}>{r.username}</span>
-            <span style={{fontSize:15,fontWeight:"bold"}}>{r.rating}</span>
-            <span style={{color:"#7c6040",fontSize:12}}>{r.wins}W/{r.losses}L</span>
+          <div key={i} onClick={()=>onViewProfile&&onViewProfile(r.username)}
+            style={{
+              display:"flex",alignItems:"center",gap:10,padding:"10px 14px",marginBottom:6,
+              background:r.username===currentProfile?.username?"#2d1a0a":"#1a1208",
+              border:`1px solid ${r.username===currentProfile?.username?"#c9a96e":"#7c4a1e22"}`,
+              borderRadius:8,color:"#c9a96e",cursor:onViewProfile?"pointer":"default",transition:"background 0.1s"
+            }}
+            onMouseEnter={e=>e.currentTarget.style.background="#2d2010"}
+            onMouseLeave={e=>e.currentTarget.style.background=r.username===currentProfile?.username?"#2d1a0a":"#1a1208"}
+          >
+            <span style={{width:24,color:"#7c6040",fontSize:13,textAlign:"right"}}>{i+1}</span>
+            <LevelBadge rating={r.rating} size={12}/>
+            <span style={{flex:1,fontSize:14}}>{r.username}</span>
+            <span style={{fontSize:14,fontWeight:"bold"}}>{r.rating}</span>
+            <span style={{color:"#7c6040",fontSize:11}}>{r.wins}W/{r.losses}L</span>
           </div>
         ))}
         {rows.length===0&&<p style={{color:"#7c6040",textAlign:"center"}}>아직 데이터가 없습니다.</p>}
@@ -1183,9 +1383,330 @@ function LeaderboardScreen({ onBack, currentProfile }) {
   );
 }
 
+
 // ============================================================
-// PVP OFFLINE SCREEN
+// PROFILE SCREEN
 // ============================================================
+function ProfileScreen({ onBack, targetUsername, currentUserId, isDemo }) {
+  const [profile, setProfile] = useState(null);
+  const [sharedBots, setSharedBots] = useState([]);
+  const [rank, setRank] = useState(null);
+  const [rivals, setRivals] = useState([]);         // 이 유저가 등록한 라이벌
+  const [reverseRivals, setReverseRivals] = useState([]); // 이 유저를 등록한 사람
+  const [isMyRival, setIsMyRival] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const isMyProfile = !targetUsername || (profile?.id === currentUserId);
+
+  useEffect(()=>{
+    (async()=>{
+      setLoading(true);
+      try {
+        let p;
+        if(targetUsername) p = await getProfileByUsername(targetUsername);
+        else p = await getProfile(currentUserId);
+        if(!p) { setLoading(false); return; }
+        setProfile(p);
+        // shared bots
+        const bots = await supaFetch(`/rest/v1/bots?user_id=eq.${p.id}&is_shared=eq.true&select=name,type,train_count`);
+        setSharedBots(bots||[]);
+        // rank
+        const r = await getUserRank(p.id);
+        setRank(r);
+        // rivals
+        if(!isDemo && currentUserId) {
+          const myRivals = await getRivals(p.id);
+          setRivals(myRivals);
+          const rev = await getReverseRivals(p.id);
+          setReverseRivals(rev);
+          if(currentUserId !== p.id) {
+            const rival = await isRival(currentUserId, p.id);
+            setIsMyRival(rival);
+          }
+        }
+      } catch(e) { console.error(e); }
+      setLoading(false);
+    })();
+  },[targetUsername, currentUserId]);
+
+  const handleToggleRival = async() => {
+    if(!profile||isDemo) return;
+    try {
+      if(isMyRival) { await removeRival(currentUserId, profile.id); setIsMyRival(false); }
+      else { await addRival(currentUserId, profile.id); setIsMyRival(true); }
+    } catch(e) { alert("라이벌 설정 실패: "+e.message); }
+  };
+
+  const lv = profile ? getLevel(profile.rating||1200) : null;
+
+  if(loading) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+      background:"#1a0e06",color:"#c9a96e",fontFamily:"Georgia,serif"}}>로딩 중...</div>
+  );
+  if(!profile) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+      background:"#1a0e06",fontFamily:"Georgia,serif"}}>
+      <div style={{textAlign:"center"}}>
+        <p style={{color:"#e07070"}}>프로필을 찾을 수 없습니다.</p>
+        <button onClick={onBack} style={btnStyle("#3d2208","#c9a96e")}>← 뒤로</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20,paddingTop:40}}>
+      <div style={{width:"100%",maxWidth:520}}>
+        {/* Header */}
+        <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
+          padding:"28px 36px",marginBottom:16,textAlign:"center",boxShadow:"0 0 40px #0008"}}>
+          <div style={{fontSize:48,marginBottom:8}}>♛</div>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:8}}>
+            <LevelBadge rating={profile.rating} size={18}/>
+            <h2 style={{color:"#c9a96e",margin:0,fontSize:24,letterSpacing:1}}>{profile.username}</h2>
+          </div>
+          <div style={{display:"flex",justifyContent:"center",marginBottom:8}}>
+            <LevelInfo rating={profile.rating}/>
+          </div>
+          <div style={{color:"#7c6040",fontSize:13,marginBottom:8}}>
+            {profile.rating}점 · {profile.wins}승 {profile.losses}패 {profile.draws}무
+            {rank&&<span style={{color:"#c9a96e",marginLeft:8}}>전체 {rank}위</span>}
+          </div>
+          {!isMyProfile&&!isDemo&&(
+            <button onClick={handleToggleRival}
+              style={{...btnStyle(isMyRival?"#3a1a0a":"#1a3a2c",isMyRival?"#e07070":"#6af5b0"),fontSize:13}}>
+              {isMyRival?"⚔️ 라이벌 해제":"⚔️ 라이벌 등록"}
+            </button>
+          )}
+        </div>
+
+        {/* Shared AIs */}
+        <div style={{background:"#1a0e06",border:"1px solid #7c4a1e44",borderRadius:10,
+          padding:"20px 24px",marginBottom:12,boxShadow:"0 0 20px #0006"}}>
+          <h3 style={{color:"#c9a96e",fontSize:15,marginBottom:12}}>🤖 공유된 AI ({sharedBots.length})</h3>
+          {sharedBots.length===0&&<p style={{color:"#7c6040",fontSize:13}}>공유된 AI가 없습니다.</p>}
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {sharedBots.map((b,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",
+                background:"#2d1a0a",borderRadius:8}}>
+                <span style={{fontSize:11,padding:"2px 6px",borderRadius:8,fontWeight:"bold",
+                  background:b.type==="qtable"?"#1a3a5c":"#3a1a5c",
+                  color:b.type==="qtable"?"#6ab4f5":"#c06af5"}}>
+                  {b.type==="qtable"?"Q":"M"}
+                </span>
+                <span style={{color:"#c9a96e",flex:1,fontSize:14}}>{b.name}</span>
+                <span style={{color:"#7c6040",fontSize:12}}>학습 {b.train_count}회</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Rivals */}
+        {rivals.length>0&&(
+          <div style={{background:"#1a0e06",border:"1px solid #7c4a1e44",borderRadius:10,
+            padding:"20px 24px",marginBottom:12}}>
+            <h3 style={{color:"#c9a96e",fontSize:15,marginBottom:12}}>⚔️ 라이벌 ({rivals.length})</h3>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {rivals.map((r,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",
+                  background:"#2d1a0a",borderRadius:8}}>
+                  <LevelBadge rating={r.rating} size={11}/>
+                  <span style={{color:"#c9a96e",flex:1,fontSize:14}}>{r.username}</span>
+                  <span style={{color:"#7c6040",fontSize:12}}>{r.rating}점</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Reverse Rivals */}
+        {reverseRivals.length>0&&(
+          <div style={{background:"#1a0e06",border:"1px solid #7c4a1e44",borderRadius:10,
+            padding:"20px 24px",marginBottom:12}}>
+            <h3 style={{color:"#c9a96e",fontSize:15,marginBottom:12}}>🎯 역라이벌 ({reverseRivals.length})</h3>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {reverseRivals.map((r,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",
+                  background:"#2d1a0a",borderRadius:8}}>
+                  <LevelBadge rating={r.rating} size={11}/>
+                  <span style={{color:"#c9a96e",flex:1,fontSize:14}}>{r.username}</span>
+                  <span style={{color:"#7c6040",fontSize:12}}>{r.rating}점</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>← 뒤로</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SCHEDULED MATCH SCREEN
+// ============================================================
+function ScheduledMatchScreen({ onBack, user, profile, onJoinMatch }) {
+  const [openMatches, setOpenMatches] = useState([]);
+  const [myMatches, setMyMatches] = useState([]);
+  const [tab, setTab] = useState("list"); // list|create|mine
+  const [schedDate, setSchedDate] = useState("");
+  const [schedTime, setSchedTime] = useState("");
+  const [note, setNote] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const refresh = async() => {
+    const [open, mine] = await Promise.all([
+      getOpenScheduledMatches(),
+      getMyScheduledMatches(user.id)
+    ]);
+    setOpenMatches(open.filter(m=>m.creator_id!==user.id));
+    setMyMatches(mine);
+  };
+
+  useEffect(()=>{ refresh(); },[]);
+
+  // Check if any confirmed match is due
+  useEffect(()=>{
+    const interval = setInterval(()=>{
+      const now = new Date();
+      myMatches.forEach(m=>{
+        if(m.status==="confirmed") {
+          const diff = new Date(m.scheduled_at) - now;
+          if(diff<=0&&diff>-30000) { // within 30s of scheduled time
+            onJoinMatch(m);
+          }
+        }
+      });
+    }, 5000);
+    return ()=>clearInterval(interval);
+  },[myMatches, onJoinMatch]);
+
+  const handleCreate = async() => {
+    if(!schedDate||!schedTime) { alert("날짜와 시간을 선택하세요."); return; }
+    const dt = new Date(`${schedDate}T${schedTime}`);
+    if(dt<=new Date()) { alert("미래 시간을 선택하세요."); return; }
+    setLoading(true);
+    try {
+      await createScheduledMatch(user.id, dt.toISOString(), note);
+      setTab("mine"); await refresh();
+    } catch(e) { alert("예약 실패: "+e.message); }
+    setLoading(false);
+  };
+
+  const handleJoin = async(match) => {
+    if(!window.confirm(`${new Date(match.scheduled_at).toLocaleString("ko-KR")}에 예약된 대전에 참가할까요?`)) return;
+    setLoading(true);
+    try {
+      await joinScheduledMatch(match.id, user.id);
+      await refresh();
+      alert("참가 완료! 예약 시간에 자동으로 대전이 시작됩니다.");
+    } catch(e) { alert("참가 실패: "+e.message); }
+    setLoading(false);
+  };
+
+  const tabBtn = (t, label) => (
+    <button onClick={()=>setTab(t)} style={{
+      padding:"8px 20px",fontFamily:"Georgia,serif",fontSize:13,cursor:"pointer",
+      background:tab===t?"#7c4a1e":"#2d1a0a",
+      color:tab===t?"#c9a96e":"#7c6040",
+      border:`1px solid ${tab===t?"#c9a96e":"#7c4a1e44"}`,
+      borderRadius:6,
+    }}>{label}</button>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20,paddingTop:40}}>
+      <div style={{width:"100%",maxWidth:520}}>
+        <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
+          padding:"24px 32px",boxShadow:"0 0 40px #0008"}}>
+          <h2 style={{color:"#c9a96e",fontSize:20,marginBottom:16,textAlign:"center"}}>📅 예약 매치</h2>
+          <div style={{display:"flex",gap:8,marginBottom:20,justifyContent:"center"}}>
+            {tabBtn("list","예약 리스트")}
+            {tabBtn("create","예약 만들기")}
+            {tabBtn("mine","내 예약")}
+          </div>
+
+          {tab==="list"&&(
+            <div>
+              {openMatches.length===0&&<p style={{color:"#7c6040",textAlign:"center"}}>참가 가능한 예약이 없습니다.</p>}
+              {openMatches.map((m,i)=>(
+                <div key={i} style={{background:"#2d1a0a",border:"1px solid #7c4a1e44",borderRadius:8,
+                  padding:"12px 16px",marginBottom:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <LevelBadge rating={m.profiles?.rating} size={11}/>
+                    <span style={{color:"#c9a96e",fontSize:14}}>{m.profiles?.username||"?"}</span>
+                    <span style={{color:"#7c6040",fontSize:12,marginLeft:"auto"}}>{m.profiles?.rating||"?"}점</span>
+                  </div>
+                  <div style={{color:"#7c6040",fontSize:13,marginBottom:8}}>
+                    📅 {new Date(m.scheduled_at).toLocaleString("ko-KR")}
+                    {m.note&&<span style={{marginLeft:8,color:"#9a8060"}}>"{m.note}"</span>}
+                  </div>
+                  <button onClick={()=>handleJoin(m)} disabled={loading}
+                    style={btnStyle("#1a3a5c","#6ab4f5")}>참가하기</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {tab==="create"&&(
+            <div>
+              <div style={{marginBottom:12}}>
+                <label style={{color:"#7c6040",fontSize:13,display:"block",marginBottom:4}}>날짜</label>
+                <input type="date" value={schedDate} onChange={e=>setSchedDate(e.target.value)}
+                  style={{...inputStyle,margin:0}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <label style={{color:"#7c6040",fontSize:13,display:"block",marginBottom:4}}>시간</label>
+                <input type="time" value={schedTime} onChange={e=>setSchedTime(e.target.value)}
+                  style={{...inputStyle,margin:0}}/>
+              </div>
+              <div style={{marginBottom:16}}>
+                <label style={{color:"#7c6040",fontSize:13,display:"block",marginBottom:4}}>메모 (선택)</label>
+                <input value={note} onChange={e=>setNote(e.target.value)}
+                  placeholder="예: 친선전, 연습 등"
+                  style={{...inputStyle,margin:0}}/>
+              </div>
+              <button onClick={handleCreate} disabled={loading}
+                style={{...btnStyle("#2d5a27","#7ec876"),width:"100%"}}>
+                {loading?"처리 중...":"예약 만들기"}
+              </button>
+            </div>
+          )}
+
+          {tab==="mine"&&(
+            <div>
+              {myMatches.length===0&&<p style={{color:"#7c6040",textAlign:"center"}}>예약된 대전이 없습니다.</p>}
+              {myMatches.map((m,i)=>{
+                const dt = new Date(m.scheduled_at);
+                const statusColor = m.status==="confirmed"?"#7ec876":m.status==="open"?"#6ab4f5":"#7c6040";
+                const statusLabel = m.status==="confirmed"?"확정":m.status==="open"?"대기중":m.status==="playing"?"진행중":"완료";
+                return (
+                  <div key={i} style={{background:"#2d1a0a",border:`1px solid ${statusColor}44`,
+                    borderRadius:8,padding:"12px 16px",marginBottom:8}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                      <span style={{color:statusColor,fontSize:12,fontWeight:"bold"}}>{statusLabel}</span>
+                      <span style={{color:"#7c6040",fontSize:12,marginLeft:"auto"}}>
+                        {m.creator_id===user.id?"내가 만듦":"참가"}
+                      </span>
+                    </div>
+                    <div style={{color:"#c9a96e",fontSize:13,marginBottom:4}}>
+                      📅 {dt.toLocaleString("ko-KR")}
+                    </div>
+                    {m.note&&<div style={{color:"#9a8060",fontSize:12}}>"{m.note}"</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%",marginTop:16}}>← 뒤로</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PvPOfflineScreen({ onBack, theme }) {
   const [board, setBoard] = useState(INIT_BOARD());
   const [turn, setTurn] = useState("w");
@@ -1197,8 +1718,10 @@ function PvPOfflineScreen({ onBack, theme }) {
   const [animPiece, setAnimPiece] = useState(null);
   const [status, setStatus] = useState("playing");
   const [message, setMessage] = useState("");
-  const [promotion, setPromotion] = useState(null); // {move, side}
+  const [promotion, setPromotion] = useState(null);
   const [flipped, setFlipped] = useState(false);
+  const posHistRef = useRef({});   // position history for threefold
+  const halfMoveRef = useRef(0);   // half-move clock for 50-move rule
 
   const {capturedByWhite, capturedByBlack} = getCaptured(board);
   const score = getMaterialScore(capturedByWhite, capturedByBlack);
@@ -1206,6 +1729,11 @@ function PvPOfflineScreen({ onBack, theme }) {
   const doMove = (b, move, side, cr, promPiece="Q") => {
     const nb = applyMove(b, move, promPiece);
     const newCR = updateCastleRights(cr, b, move);
+    // 50수 clock: 폰 이동 or 기물 포획이면 리셋
+    const isPawnMove = b[move.from[0]][move.from[1]]?.[1]==="P";
+    const isCapture = !!b[move.to[0]][move.to[1]] || move.enPassant;
+    if(isPawnMove||isCapture) halfMoveRef.current=0;
+    else halfMoveRef.current++;
     setAnimPiece({to:move.to});
     setTimeout(()=>setAnimPiece(null),300);
     setLastMoveSq([move.from, move.to]);
@@ -1215,12 +1743,19 @@ function PvPOfflineScreen({ onBack, theme }) {
     setSelected(null); setHighlights([]);
     const opp = side==="w"?"b":"w";
     setTurn(opp);
+    // Update position history
+    const hash = boardHash(nb, opp, newCR);
+    posHistRef.current[hash] = (posHistRef.current[hash]||0)+1;
     const nextMoves = getAllValidMoves(nb, opp, move, newCR);
     if(!nextMoves.length) {
       const inChk = isInCheck(nb, opp);
-      setStatus(inChk?`checkmate_${side}`:"stalemate");
-      setMessage(inChk?(side==="w"?"백(White) 승리!":"흑(Black) 승리!"):"스테일메이트 (무승부)");
+      if(inChk) { setStatus(`checkmate_${side}`); setMessage(side==="w"?"백(White) 승리!":"흑(Black) 승리!"); }
+      else { setStatus("draw"); setMessage("스테일메이트 — 무승부"); }
+      return;
     }
+    // Check other draw conditions
+    const drawReason = checkDrawReason(nb, opp, newCR, move, posHistRef.current, halfMoveRef.current);
+    if(drawReason) { setStatus("draw"); setMessage(`무승부 — ${drawReason}`); }
   };
 
   const handleClick = (r, c) => {
@@ -1245,6 +1780,7 @@ function PvPOfflineScreen({ onBack, theme }) {
     setLastMoveSq(null); setLastMove(null);
     setCastleRights({w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}});
     setStatus("playing"); setMessage(""); setPromotion(null);
+    posHistRef.current={}; halfMoveRef.current=0;
   };
 
   return (
@@ -1289,7 +1825,7 @@ function PvPOfflineScreen({ onBack, theme }) {
 // ============================================================
 // PVP ONLINE SCREEN
 // ============================================================
-function PvPOnlineScreen({ onBack, user, profile, theme }) {
+function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   const [phase, setPhase] = useState("lobby"); // lobby|waiting|playing|result
   const [matchMode, setMatchMode] = useState(null); // random|room
   const [roomCode, setRoomCode] = useState("");
@@ -1309,8 +1845,14 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
   const [ratingChange, setRatingChange] = useState(null);
   const [oppProfile, setOppProfile] = useState(null);
   const [promotion, setPromotion] = useState(null);
+  const [timeControl, setTimeControl] = useState(60); // seconds per move: 30 or 60
+  const [timeLeft, setTimeLeft] = useState(60);
+  const [selectingTime, setSelectingTime] = useState(true); // show time selection first
   const pollRef = useRef(null);
   const roomRef = useRef(null);
+  const timerRef = useRef(null);
+  const posHistRef = useRef({});
+  const halfMoveRef = useRef(0);
 
   const {capturedByWhite, capturedByBlack} = getCaptured(board);
   const score = getMaterialScore(capturedByWhite, capturedByBlack);
@@ -1329,20 +1871,47 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
         if(r.castle_rights) setCastleRights(r.castle_rights);
         if(r.status==="finished") {
           clearInterval(pollRef.current);
+          clearInterval(timerRef.current);
           const myChange = mySide==="w"?r.white_rating_change:r.black_rating_change;
           setRatingChange(myChange);
-          setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:"무승부");
+          const isDraw = !r.winner_id;
+          const drawMsg = r.result&&r.result!=="checkmate"&&r.result!=="stalemate"&&r.result!=="timeout"?` (${r.result})`:"";
+          setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
           setStatus("finished");
           setPhase("result");
-          if(r.winner_id===user.id) await updateRating(user.id, myChange);
-          else if(r.winner_id) await updateRating(user.id, myChange);
-          else await updateRating(user.id, 0);
+          await updateRating(user.id, myChange);
         }
       } catch(e) { console.error("poll error", e); }
     }, 1000);
   }, [phase, mySide, user.id]);
 
   useEffect(()=>()=>{ if(pollRef.current) clearInterval(pollRef.current); },[]);
+
+  // Timer effect - runs when it's my turn during playing phase
+  useEffect(()=>{
+    if(phase!=="playing"||status!=="playing") { clearInterval(timerRef.current); return; }
+    if(turn!==mySide) { clearInterval(timerRef.current); setTimeLeft(timeControl); return; }
+    setTimeLeft(timeControl);
+    clearInterval(timerRef.current);
+    timerRef.current = setInterval(()=>{
+      setTimeLeft(t=>{
+        if(t<=1) {
+          clearInterval(timerRef.current);
+          // Time out — lose
+          const oppId = mySide==="w"?roomRef.current?.black_id:roomRef.current?.white_id;
+          const wChange = mySide==="w"?-16:16;
+          const bChange = mySide==="b"?-16:16;
+          pushMove(roomRef.current?.id, board, turn, lastMove, castleRights,
+            "timeout", oppId, wChange, bChange).catch(()=>{});
+          setMessage("시간 초과 — 패배 😞");
+          setStatus("timeout");
+          return 0;
+        }
+        return t-1;
+      });
+    }, 1000);
+    return ()=>clearInterval(timerRef.current);
+  },[phase, turn, mySide, status, timeControl]);
 
   const startRandom = async() => {
     setMatchMode("random"); setPhase("waiting");
@@ -1408,6 +1977,11 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
     const nb=applyMove(b,move,promPiece);
     const newCR=updateCastleRights(cr,b,move);
     const opp=mySide==="w"?"b":"w";
+    // Update draw tracking
+    const isPawnMove = b[move.from[0]][move.from[1]]?.[1]==="P";
+    const isCapture = !!b[move.to[0]][move.to[1]]||move.enPassant;
+    if(isPawnMove||isCapture) halfMoveRef.current=0;
+    else halfMoveRef.current++;
     setAnimPiece({to:move.to});
     setTimeout(()=>setAnimPiece(null),300);
     setLastMoveSq([move.from,move.to]);
@@ -1416,6 +1990,10 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
     setBoard(nb);
     setSelected(null); setHighlights([]);
     setTurn(opp);
+    clearInterval(timerRef.current);
+    // Update position history
+    const hash = boardHash(nb, opp, newCR);
+    posHistRef.current[hash]=(posHistRef.current[hash]||0)+1;
 
     const nextMoves=getAllValidMoves(nb,opp,move,newCR);
     let result=null, winnerId=null, wChange=0, bChange=0;
@@ -1432,11 +2010,64 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
         if(mySide==="w"){ wChange=delta; bChange=-delta; }
         else { bChange=delta; wChange=-delta; }
       }
+    } else {
+      // Check other draw conditions
+      const drawReason = checkDrawReason(nb, opp, newCR, move, posHistRef.current, halfMoveRef.current);
+      if(drawReason) { result=drawReason; }
     }
     try {
       await pushMove(room.id,nb,opp,move,newCR,result,winnerId,wChange,bChange);
     } catch(e){ console.error("pushMove error",e); }
     setPromotion(null);
+  };
+
+  // Time selection
+  if(selectingTime) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
+      background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif"}}>
+      <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
+        padding:"40px 56px",textAlign:"center",boxShadow:"0 0 40px #0008",minWidth:340}}>
+        <h2 style={{color:"#c9a96e",fontSize:22,marginBottom:8}}>⏱ 시간 제한 설정</h2>
+        <p style={{color:"#7c6040",fontSize:13,marginBottom:28}}>한 수당 제한 시간을 선택하세요</p>
+        <div style={{display:"flex",gap:16,justifyContent:"center",marginBottom:24}}>
+          {[30,60].map(t=>(
+            <button key={t} onClick={()=>{setTimeControl(t);setTimeLeft(t);setSelectingTime(false);}}
+              style={{
+                width:120,padding:"20px 0",
+                background:timeControl===t?"#7c4a1e":"#2d1a0a",
+                color:"#c9a96e",
+                border:`2px solid ${timeControl===t?"#c9a96e":"#7c4a1e44"}`,
+                borderRadius:10,cursor:"pointer",fontFamily:"Georgia,serif",
+              }}>
+              <div style={{fontSize:32,fontWeight:"bold",marginBottom:4}}>{t}초</div>
+              <div style={{fontSize:12,color:"#7c6040"}}>{t===30?"빠른 대전":"일반 대전"}</div>
+            </button>
+          ))}
+        </div>
+        <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>← 뒤로</button>
+      </div>
+    </div>
+  );
+
+  // Rival match
+  const [rivals, setRivals] = useState([]);
+  const [showRivals, setShowRivals] = useState(false);
+  useEffect(()=>{
+    if(showRivals) getRivals(user.id).then(setRivals);
+  },[showRivals, user.id]);
+
+  const startRivalMatch = async(rivalId) => {
+    setMatchMode("room"); setPhase("waiting");
+    const code = "R"+Math.random().toString(36).slice(2,7).toUpperCase();
+    try {
+      const newRoom = await createRoom(user.id, "room", code);
+      setRoom(newRoom); setMySide("w"); setRoomCode(code);
+      setShowRivals(false);
+      // Notify rival via room code (they need to manually join for now)
+      alert(`방 코드: ${code}
+라이벌에게 코드를 전달하세요!`);
+      startPoll(newRoom.id);
+    } catch(e) { alert("방 생성 실패: "+e.message); setPhase("lobby"); }
   };
 
   // Lobby
@@ -1446,20 +2077,35 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
       <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
         padding:"32px 40px",width:"100%",maxWidth:440,boxShadow:"0 0 40px #0008",textAlign:"center"}}>
         <h2 style={{color:"#c9a96e",fontSize:22,marginBottom:4}}>🌐 온라인 대전</h2>
-        <p style={{color:"#7c6040",fontSize:13,marginBottom:28}}>{profile?.username} · {profile?.rating}점</p>
-        <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:20}}>
-          <button onClick={startRandom} style={btnStyle("#5a1a5c","#e06af5")}>
-            🎲 랜덤 매칭
-          </button>
-          <button onClick={createRoomCode} style={btnStyle("#1a3a5c","#6ab4f5")}>
-            🏠 방 만들기
-          </button>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:20}}>
+          <LevelBadge rating={profile?.rating} size={13}/>
+          <span style={{color:"#7c6040",fontSize:13}}>{profile?.username} · {profile?.rating}점</span>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+          <button onClick={startRandom} style={btnStyle("#5a1a5c","#e06af5")}>🎲 랜덤 매칭</button>
+          <button onClick={createRoomCode} style={btnStyle("#1a3a5c","#6ab4f5")}>🏠 방 만들기</button>
+          <button onClick={()=>setShowRivals(!showRivals)} style={btnStyle("#3a1a2c","#f06af5")}>⚔️ 라이벌 매칭</button>
+          {showRivals&&(
+            <div style={{background:"#2d1a0a",border:"1px solid #7c4a1e44",borderRadius:8,padding:"10px 12px",textAlign:"left"}}>
+              {rivals.length===0&&<p style={{color:"#7c6040",fontSize:13,margin:0}}>등록된 라이벌이 없습니다.</p>}
+              {rivals.map((r,i)=>(
+                <div key={i} onClick={()=>startRivalMatch(r.id)}
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",cursor:"pointer",
+                    borderRadius:6,marginBottom:4,background:"#1a0e06"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="#3d2a14"}
+                  onMouseLeave={e=>e.currentTarget.style.background="#1a0e06"}>
+                  <LevelBadge rating={r.rating} size={11}/>
+                  <span style={{color:"#c9a96e",flex:1,fontSize:13}}>{r.username}</span>
+                  <span style={{color:"#7c6040",fontSize:12}}>{r.rating}점</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <button onClick={()=>onScheduled()} style={btnStyle("#2a2a0a","#f5c842")}>📅 예약 매치</button>
           <div style={{display:"flex",gap:8}}>
             <input value={inputCode} onChange={e=>setInputCode(e.target.value)}
               placeholder="방 코드 입력" style={{...inputStyle,margin:0,flex:1,fontSize:13}}/>
-            <button onClick={joinByCode} style={{...btnStyle("#2d5a27","#7ec876"),padding:"12px 16px",fontSize:13}}>
-              참가
-            </button>
+            <button onClick={joinByCode} style={{...btnStyle("#2d5a27","#7ec876"),padding:"12px 16px",fontSize:13}}>참가</button>
           </div>
         </div>
         <button onClick={onBack} style={{...btnStyle("#3d2208","#c9a96e"),width:"100%"}}>← 뒤로</button>
@@ -1517,12 +2163,32 @@ function PvPOnlineScreen({ onBack, user, profile, theme }) {
 
       <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:10,
         padding:"12px 24px",marginBottom:12,textAlign:"center"}}>
-        <span style={{color:"#c9a96e",fontSize:15}}>
-          {profile?.username}({profile?.rating}) vs {oppProfile?.username||"상대"}({oppProfile?.rating||"?"})
-        </span>
-        <span style={{color:myTurn?"#7ec876":"#7c6040",fontSize:13,marginLeft:12}}>
-          {myTurn?"내 차례":"상대 차례"}
-        </span>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+          <LevelBadge rating={profile?.rating} size={12}/>
+          <span style={{color:"#c9a96e",fontSize:14}}>{profile?.username}({profile?.rating})</span>
+          <span style={{color:"#7c6040",fontSize:13}}>vs</span>
+          <LevelBadge rating={oppProfile?.rating} size={12}/>
+          <span style={{color:"#c9a96e",fontSize:14}}>{oppProfile?.username||"상대"}({oppProfile?.rating||"?"})</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
+          <span style={{color:myTurn?"#7ec876":"#7c6040",fontSize:13}}>
+            {myTurn?"⬡ 내 차례":"⬡ 상대 차례"}
+          </span>
+          {myTurn&&status==="playing"&&(
+            <div style={{
+              display:"inline-flex",alignItems:"center",gap:6,
+              background:timeLeft<=10?"#3a0000":"#2d1a0a",
+              border:`1px solid ${timeLeft<=10?"#ff4444":"#7c4a1e44"}`,
+              borderRadius:20,padding:"3px 12px",
+            }}>
+              <span style={{fontSize:18}}>⏱</span>
+              <span style={{
+                color:timeLeft<=10?"#ff6666":"#c9a96e",
+                fontSize:16,fontWeight:"bold",fontFamily:"monospace",minWidth:28,textAlign:"center"
+              }}>{timeLeft}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       <div style={{width:500,maxWidth:"95vw",marginBottom:4}}>
@@ -1776,7 +2442,9 @@ function AIManageScreen({ onBack, bots, isDemo, onRefresh, userId }) {
   const [renaming, setRenaming] = useState(null);
   const [newName, setNewName] = useState("");
   const [loading, setLoading] = useState(null);
-  const [localBots, setLocalBots] = useState(()=>({...bots}));
+  const [localBots, setLocalBots] = useState(()=>({...(bots||{})}));
+  // Sync if parent bots changes (e.g. after refresh)
+  useEffect(()=>{ setLocalBots({...(bots||{})}); }, [bots]);
   const names = Object.keys(localBots||{});
 
   const handleRename = async(oldName) => {
@@ -2405,13 +3073,13 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate, theme="wood" }) {
 // APP ROOT
 // ============================================================
 export default function App() {
-  const [authState, setAuthState] = useState("loading"); // loading|auth|app
+  const [authState, setAuthState] = useState("loading");
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
-  const [screen, setScreen] = useState("menu"); // menu|ai|pvp_offline|pvp_online|leaderboard
+  const [screen, setScreen] = useState("menu");
+  const [screenParam, setScreenParam] = useState(null); // for profile username etc
   const [theme, setTheme] = useState(()=>localStorage.getItem("chess_theme")||"wood");
 
-  // Restore session on mount
   useEffect(()=>{
     restoreSession().then(async u=>{
       if(u){ setUser(u); const p=await getProfile(u.id); setProfile(p); setAuthState("app"); }
@@ -2430,10 +3098,8 @@ export default function App() {
   };
 
   const handleDemo = () => {
-    setUser("demo");
-    setProfile(null);
-    setAuthState("app");
-    setScreen("menu");
+    setUser("demo"); setProfile(null);
+    setAuthState("app"); setScreen("menu");
   };
 
   const handleLogout = async() => {
@@ -2441,19 +3107,49 @@ export default function App() {
     setUser(null); setProfile(null); setAuthState("auth"); setScreen("menu");
   };
 
+  const goProfile = (username=null) => {
+    setScreenParam(username);
+    setScreen("profile");
+  };
+
+  const refreshProfile = async() => {
+    if(user&&user!=="demo") {
+      const p = await getProfile(user.id);
+      setProfile(p);
+    }
+  };
+
   if(authState==="loading") return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
-      background:"#1a0e06",color:"#c9a96e",fontFamily:"Georgia,serif",fontSize:24}}>
-      ♟ 로딩 중...
-    </div>
+      background:"#1a0e06",color:"#c9a96e",fontFamily:"Georgia,serif",fontSize:24}}>♟ 로딩 중...</div>
   );
 
   if(authState==="auth") return <AuthScreen onLogin={handleLogin} onDemo={handleDemo}/>;
 
-  if(screen==="leaderboard") return <LeaderboardScreen onBack={()=>setScreen("menu")} currentProfile={profile}/>;
+  if(screen==="leaderboard") return (
+    <LeaderboardScreen onBack={()=>setScreen("menu")} currentProfile={profile}
+      onViewProfile={uname=>goProfile(uname)}/>
+  );
   if(screen==="pvp_offline") return <PvPOfflineScreen onBack={()=>setScreen("menu")} theme={theme}/>;
-  if(screen==="pvp_online") return <PvPOnlineScreen onBack={()=>setScreen("menu")} user={user} profile={profile} theme={theme}/>;
-
+  if(screen==="pvp_online") return (
+    <PvPOnlineScreen onBack={()=>setScreen("menu")} user={user} profile={profile} theme={theme}
+      onScheduled={()=>setScreen("scheduled")}/>
+  );
+  if(screen==="scheduled") return (
+    <ScheduledMatchScreen
+      onBack={()=>setScreen("pvp_online")}
+      user={user} profile={profile}
+      onJoinMatch={(m)=>{ setScreenParam(m); setScreen("pvp_online"); }}
+    />
+  );
+  if(screen==="profile") return (
+    <ProfileScreen
+      onBack={()=>{ refreshProfile(); setScreen(screenParam?"leaderboard":"menu"); }}
+      targetUsername={screenParam}
+      currentUserId={user==="demo"?null:user?.id}
+      isDemo={user==="demo"}
+    />
+  );
   if(screen==="ai") return <AIRoot user={user} profile={profile} onBack={()=>setScreen("menu")} theme={theme}/>;
 
   return (
@@ -2466,6 +3162,7 @@ export default function App() {
       onLogout={handleLogout}
       theme={theme}
       onThemeChange={handleThemeChange}
+      onProfile={()=>goProfile(null)}
     />
   );
 }
