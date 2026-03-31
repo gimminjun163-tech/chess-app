@@ -631,22 +631,25 @@ let _supaToken = null;
 let _supaUser = null;
 
 async function authSignUp(email, password, username) {
+  if(!SUPA_URL || !SUPA_KEY) throw new Error("Supabase 환경변수가 설정되지 않았습니다.");
   const r = await fetch(SUPA_URL+"/auth/v1/signup", {
     method:"POST", headers:{"Content-Type":"application/json","apikey":SUPA_KEY},
     body: JSON.stringify({email, password, options:{data:{username}}})
   });
   const d = await r.json();
-  if(d.error) throw new Error(d.error.message||d.error);
+  if(d.error) throw new Error(d.error.message||d.error_description||JSON.stringify(d.error));
   return d;
 }
 
 async function authSignIn(email, password) {
+  if(!SUPA_URL || !SUPA_KEY) throw new Error("Supabase 환경변수가 설정되지 않았습니다. Vercel에서 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY를 확인하세요.");
   const r = await fetch(SUPA_URL+"/auth/v1/token?grant_type=password", {
     method:"POST", headers:{"Content-Type":"application/json","apikey":SUPA_KEY},
     body: JSON.stringify({email, password})
   });
   const d = await r.json();
-  if(d.error) throw new Error(d.error.message||d.error);
+  if(d.error) throw new Error(d.error.message||d.error_description||JSON.stringify(d.error));
+  if(!d.access_token) throw new Error("로그인 응답 오류: " + JSON.stringify(d));
   _supaToken = d.access_token;
   _supaUser = d.user;
   return d;
