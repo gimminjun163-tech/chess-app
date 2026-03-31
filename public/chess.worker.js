@@ -1,6 +1,3 @@
-// chess.worker.js — Web Worker for background training
-// Runs Minimax self-play without blocking the main thread
-
 // ============================================================
 // CHESS LOGIC
 // ============================================================
@@ -105,8 +102,8 @@ function applyMove(board, move, promPiece="Q") {
   const side = color(piece);
   nb[tr][tc]=piece;
   nb[fr][fc]=null;
-  if(move.castle==="k"){nb[tr][fc-1]=side+"R";nb[tr][7]=null;}
-  if(move.castle==="q"){nb[tr][fc+1]=side+"R";nb[tr][0]=null;}
+  if(move.castle==="k"){nb[tr][tc-1]=side+"R";nb[tr][7]=null;}
+  if(move.castle==="q"){nb[tr][tc+1]=side+"R";nb[tr][0]=null;}
   if(move.enPassant){nb[fr][tc]=null;}
   if(move.promote){nb[tr][tc]=side+promPiece;}
   return nb;
@@ -135,9 +132,10 @@ function getValidMoves(board, r, c, lastMove, castleRights) {
     const nb=applyMove(board,m);
     if(isInCheck(nb,side)) return false;
     if(m.castle) {
+      // Cannot castle if king passes through an attacked square
       const midC = m.castle==="k"?5:3;
       const nb2=applyMove(board,{from:m.from,to:[m.from[0],midC]});
-      if(isInCheck(board,side)||isInCheck(nb2,side)) return false;
+      if(isInCheck(nb2,side)) return false;
     }
     return true;
   });
@@ -234,9 +232,120 @@ const PST_BASE = {
 
 const BASE_PIECE_VAL = { P:100, N:320, B:330, R:500, Q:900, K:20000 };
 
+// ============================================================
+// Q-TABLE AI
+// ============================================================
+function boardToKey(board, side) {
+  return board.map(r=>r.map(c=>c||".").join("")).join("|")+side;
+}
+function moveToKey(m) {
+  return `${m.from[0]}${m.from[1]}${m.to[0]}${m.to[1]}${m.castle||""}${m.promote||""}`;
+}
+function evalMaterial(board, side) {
+  const vals = {P:1,N:3,B:3,R:5,Q:9,K:0};
+  let score=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+    const p=board[r][c]; if(!p) continue;
+    score += color(p)===side ? (vals[p[1]]||0) : -(vals[p[1]]||0);
+  }
+  return score;
+}
+
+class QTableAI {
+  constructor(name) {
+    this.name = name;
+    this.type = "qtable";
+    this.trainCount = 0;
+    this.qtable = {};
+    this.epsilon = 0.3;
+    this.alpha = 0.1;
+    this.gamma = 0.9;
+    this.depth = 0; // unused, for compat
+  }
+  getQ(state, mkey) {
+    if(!this.qtable[state]) return 0;
+    return this.qtable[state][mkey]||0;
+  }
+  setQ(state, mkey, val) {
+    if(!this.qtable[state]) this.qtable[state]={};
+    this.qtable[state][mkey]=val;
+  }
+  chooseMove(board, side, lastMove, castleRights, explore=true) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) return null;
+    const state = boardToKey(board, side);
+    if(explore && Math.random()<this.epsilon)
+      return moves[Math.floor(Math.random()*moves.length)];
+    let best=null, bestQ=-Infinity;
+    for(const m of moves) {
+      const q=this.getQ(state,moveToKey(m));
+      if(q>bestQ){bestQ=q;best=m;}
+    }
+    return best||moves[Math.floor(Math.random()*moves.length)];
+  }
+  learnFromGame(winner, history) {
+    history.forEach(({state,mkey,s,nextState,nextMoves,immediate})=>{
+      const oldQ = this.getQ(state, mkey);
+      let maxNext = 0;
+      if(nextMoves&&nextMoves.length)
+        maxNext = Math.max(...nextMoves.map(m=>this.getQ(nextState,moveToKey(m))));
+      let reward = immediate*0.1;
+      if(winner===s) reward+=10;
+      else if(winner&&winner!==s) reward-=10;
+      const newQ = oldQ + this.alpha*(reward + this.gamma*maxNext - oldQ);
+      this.setQ(state, mkey, newQ);
+    });
+    this.trainCount++;
+  }
+  serialize() {
+    const keys = Object.keys(this.qtable);
+    const trimmed = {};
+    keys.slice(-2000).forEach(k=>{trimmed[k]=this.qtable[k];});
+    return { name:this.name, type:"qtable", trainCount:this.trainCount, qtable:trimmed, epsilon:this.epsilon };
+  }
+  static deserialize(data) {
+    const ai = new QTableAI(data.name);
+    ai.trainCount = data.trainCount||0;
+    ai.qtable = data.qtable||{};
+    if(data.epsilon) ai.epsilon = data.epsilon;
+    return ai;
+  }
+}
+
+function playGameQTable(ai, maxMoves=200) {
+  let board = INIT_BOARD(), side="w", lastMove=null;
+  let castleRights = {w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}};
+  const history = [];
+  for(let i=0;i<maxMoves;i++) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) {
+      const inCheck = isInCheck(board, side);
+      const winner = inCheck ? (side==="w"?"b":"w") : null;
+      ai.learnFromGame(winner, history);
+      return winner;
+    }
+    const state = boardToKey(board, side);
+    const move = ai.chooseMove(board, side, lastMove, castleRights, true);
+    if(!move) break;
+    const mkey = moveToKey(move);
+    const nb = applyMove(board, move);
+    const newCR = updateCastleRights(castleRights, board, move);
+    const opp = side==="w"?"b":"w";
+    const oppMoves = getAllValidMoves(nb, opp, move, newCR);
+    const nextState = boardToKey(nb, opp);
+    const immediate = evalMaterial(nb, side) - evalMaterial(board, side);
+    history.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate});
+    lastMove=move; board=nb; castleRights=newCR; side=opp;
+  }
+  ai.learnFromGame(null, history);
+  return null;
+}
+
+
 class ChessAI {
   constructor(name) {
     this.name = name;
+    this.type = "minimax";
     this.trainCount = 0;
     // 학습 가중치: 각 기물 가치 보정 (BASE에 더해짐)
     this.weights = {
@@ -398,6 +507,7 @@ class ChessAI {
   serialize() {
     return {
       name: this.name,
+      type: "minimax",
       trainCount: this.trainCount,
       weights: this.weights,
       depth: this.depth,
@@ -415,6 +525,7 @@ class ChessAI {
 
 // ── 빠른 학습용 셀프플레이 ──
 function playGame(ai, maxMoves = 160) {
+  if(ai.type==="qtable") return playGameQTable(ai, maxMoves);
   let board = INIT_BOARD();
   let side = "w";
   let lastMove = null;
@@ -445,45 +556,90 @@ function playGame(ai, maxMoves = 160) {
 let workerAI = null;
 let running = false;
 
+function boardToKey(board, side) {
+  return board.map(r=>r.map(c=>c||".").join("")).join("|")+side;
+}
+function moveToKey(m) {
+  return String(m.from[0])+m.from[1]+m.to[0]+m.to[1]+(m.castle||"")+(m.promote||"");
+}
+function evalMaterial(board, side) {
+  const vals={P:1,N:3,B:3,R:5,Q:9,K:0};
+  let score=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){const p=board[r][c];if(!p)continue;score+=color(p)===side?(vals[p[1]]||0):-(vals[p[1]]||0);}
+  return score;
+}
+class QTableAI {
+  constructor(name){this.name=name;this.type="qtable";this.trainCount=0;this.qtable={};this.epsilon=0.3;this.alpha=0.1;this.gamma=0.9;this.depth=0;}
+  getQ(s,m){return (this.qtable[s]&&this.qtable[s][m])||0;}
+  setQ(s,m,v){if(!this.qtable[s])this.qtable[s]={};this.qtable[s][m]=v;}
+  chooseMove(board,side,lm,cr,explore=true){
+    const moves=getAllValidMoves(board,side,lm,cr);if(!moves.length)return null;
+    const state=boardToKey(board,side);
+    if(explore&&Math.random()<this.epsilon)return moves[Math.floor(Math.random()*moves.length)];
+    let best=null,bestQ=-Infinity;
+    for(const m of moves){const q=this.getQ(state,moveToKey(m));if(q>bestQ){bestQ=q;best=m;}}
+    return best||moves[0];
+  }
+  learnFromGame(winner,history){
+    (history||[]).forEach(({state,mkey,s,nextState,nextMoves,immediate})=>{
+      const oldQ=this.getQ(state,mkey);
+      let maxNext=0;if(nextMoves&&nextMoves.length)maxNext=Math.max(...nextMoves.map(m=>this.getQ(nextState,moveToKey(m))));
+      let reward=immediate*0.1;if(winner===s)reward+=10;else if(winner&&winner!==s)reward-=10;
+      this.setQ(state,mkey,oldQ+this.alpha*(reward+this.gamma*maxNext-oldQ));
+    });
+    this.trainCount++;
+  }
+  serialize(){const keys=Object.keys(this.qtable);const t={};keys.slice(-2000).forEach(k=>{t[k]=this.qtable[k];});return{name:this.name,type:"qtable",trainCount:this.trainCount,qtable:t,epsilon:this.epsilon};}
+  static deserialize(d){const ai=new QTableAI(d.name);ai.trainCount=d.trainCount||0;ai.qtable=d.qtable||{};if(d.epsilon)ai.epsilon=d.epsilon;return ai;}
+}
+function playGameQTable(ai,maxMoves=200){
+  let board=INIT_BOARD(),side="w",lastMove=null,castleRights={w:{kingSide:true,queenSide:true},b:{kingSide:true,queenSide:true}};
+  const history=[];
+  for(let i=0;i<maxMoves;i++){
+    const moves=getAllValidMoves(board,side,lastMove,castleRights);
+    if(!moves.length){const inCheck=isInCheck(board,side);const winner=inCheck?(side==="w"?"b":"w"):null;ai.learnFromGame(winner,history);return winner;}
+    const state=boardToKey(board,side);const move=ai.chooseMove(board,side,lastMove,castleRights,true);if(!move)break;
+    const mkey=moveToKey(move);const nb=applyMove(board,move);const newCR=updateCastleRights(castleRights,board,move);
+    const opp=side==="w"?"b":"w";const oppMoves=getAllValidMoves(nb,opp,move,newCR);const nextState=boardToKey(nb,opp);
+    const immediate=evalMaterial(nb,side)-evalMaterial(board,side);
+    history.push({state,mkey,s:side,nextState,nextMoves:oppMoves,immediate});
+    lastMove=move;board=nb;castleRights=newCR;side=opp;
+  }
+  ai.learnFromGame(null,history);return null;
+}
+
 self.onmessage = (e) => {
   const { type, data } = e.data;
-
   if (type === "init") {
-    workerAI = ChessAI.deserialize(data.ai);
+    workerAI = data.ai.type==="qtable" ? QTableAI.deserialize(data.ai) : ChessAI.deserialize(data.ai);
     running = true;
     runTraining();
   }
-
   if (type === "stop") {
     running = false;
-    // Send final weights back
-    if (workerAI) {
-      self.postMessage({ type: "done", ai: workerAI.serialize() });
-    }
+    if (workerAI) self.postMessage({ type: "done", ai: workerAI.serialize() });
   }
-
   if (type === "getWeights") {
-    if (workerAI) {
-      self.postMessage({ type: "weights", ai: workerAI.serialize() });
-    }
+    if (workerAI) self.postMessage({ type: "weights", ai: workerAI.serialize() });
   }
 };
 
 function runTraining() {
   if (!running || !workerAI) return;
-
-  // Play a batch of games
   const BATCH = 5;
   for (let i = 0; i < BATCH; i++) {
     if (!running) break;
-    playGame(workerAI);
+    if(workerAI.type==="qtable") playGameQTable(workerAI);
+    else playGame(workerAI);
   }
-
-  // Report progress every batch
-  self.postMessage({ type: "progress", trainCount: workerAI.trainCount, weights: workerAI.weights });
-
-  // Yield to allow stop messages, then continue
-  if (running) {
-    setTimeout(runTraining, 0);
+  const progressData = { type: "progress", trainCount: workerAI.trainCount };
+  if(workerAI.type === "qtable") {
+    if(workerAI.trainCount % 50 === 0) progressData.qtable = workerAI.qtable;
+    progressData.aiType = "qtable";
+  } else {
+    progressData.weights = workerAI.weights;
+    progressData.aiType = "minimax";
   }
+  self.postMessage(progressData);
+  if (running) setTimeout(runTraining, 0);
 }
