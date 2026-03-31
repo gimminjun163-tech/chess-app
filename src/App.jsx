@@ -1200,14 +1200,15 @@ function AuthScreen({ onLogin, onDemo }) {
     try {
       if(isSignup) {
         if(!username.trim()) throw new Error("닉네임을 입력하세요");
-        const data = await authSignUp(email, password, username.trim());
-        if(data.user) {
-          // auto sign in after signup
+        await authSignUp(email, password, username.trim());
+        // 회원가입 후 바로 로그인 시도 (이메일 인증 OFF 기준)
+        try {
           const loginData = await authSignIn(email, password);
           await saveSession(loginData);
           onLogin(loginData.user);
-        } else {
-          setError("이메일 확인 후 로그인하세요");
+        } catch(e) {
+          setError("회원가입 완료! 로그인 탭에서 로그인하세요.");
+          setIsSignup(false);
         }
       } else {
         const data = await authSignIn(email, password);
