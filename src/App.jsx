@@ -1203,15 +1203,29 @@ function AuthScreen({ onLogin, onDemo }) {
     try {
       if(isSignup) {
         if(!username.trim()) throw new Error("닉네임을 입력하세요");
-        await authSignUp(email, password, username.trim());
-        // 회원가입 후 바로 로그인 시도 (이메일 인증 OFF 기준)
-        try {
-          const loginData = await authSignIn(email, password);
-          await saveSession(loginData);
-          onLogin(loginData.user);
-        } catch(e) {
-          setError("회원가입 완료! 로그인 탭에서 로그인하세요.");
-          setIsSignup(false);
+        const signupData = await authSignUp(email, password, username.trim());
+        // 회원가입 후 세션이 바로 오는 경우 (Confirm email OFF)
+        if(signupData.access_token) {
+          _supaToken = signupData.access_token;
+          _supaUser = signupData.user;
+          await saveSession(signupData);
+          onLogin(signupData.user);
+        } else if(signupData.session?.access_token) {
+          _supaToken = signupData.session.access_token;
+          _supaUser = signupData.user;
+          await saveSession({...signupData.session, refresh_token: signupData.session.refresh_token});
+          onLogin(signupData.user);
+        } else {
+          // 세션 없으면 잠깐 기다렸다가 로그인 시도
+          await new Promise(r=>setTimeout(r,1000));
+          try {
+            const loginData = await authSignIn(email, password);
+            await saveSession(loginData);
+            onLogin(loginData.user);
+          } catch(e) {
+            setError("회원가입 완료! 바로 로그인해주세요.");
+            setIsSignup(false);
+          }
         }
       } else {
         const data = await authSignIn(email, password);
@@ -2026,6 +2040,13 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   };
 
   // Time selection
+  // Rival match (훅은 조건문 앞에 있어야 함)
+  const [rivals, setRivals] = useState([]);
+  const [showRivals, setShowRivals] = useState(false);
+  useEffect(()=>{
+    if(showRivals) getRivals(user.id).then(setRivals);
+  },[showRivals, user.id]);
+
   if(selectingTime) return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",
       background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif"}}>
@@ -2052,13 +2073,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
       </div>
     </div>
   );
-
-  // Rival match
-  const [rivals, setRivals] = useState([]);
-  const [showRivals, setShowRivals] = useState(false);
-  useEffect(()=>{
-    if(showRivals) getRivals(user.id).then(setRivals);
-  },[showRivals, user.id]);
 
   const startRivalMatch = async(rivalId) => {
     setMatchMode("room"); setPhase("waiting");
