@@ -924,7 +924,13 @@ async function createScheduledMatch(creatorId, scheduledAt, note="") {
 }
 
 async function getOpenScheduledMatches() {
-  const rows = await supaFetch(`/rest/v1/scheduled_matches?status=eq.open&select=*,profiles!scheduled_matches_creator_id_fkey(username,rating)&order=scheduled_at.asc`);
+  const now = new Date().toISOString();
+  // 지난 예약은 자동 cancelled 처리
+  await supaFetch(
+    `/rest/v1/scheduled_matches?status=eq.open&scheduled_at=lt.${now}`,
+    {method:"PATCH", body:JSON.stringify({status:"cancelled"})}
+  ).catch(()=>{});
+  const rows = await supaFetch(`/rest/v1/scheduled_matches?status=eq.open&scheduled_at=gte.${now}&select=*,profiles!scheduled_matches_creator_id_fkey(username,rating)&order=scheduled_at.asc`);
   return rows||[];
 }
 
@@ -1577,8 +1583,17 @@ function ScheduledMatchScreen({ onBack, user, profile, onJoinMatch }) {
       getOpenScheduledMatches(),
       getMyScheduledMatches(user.id)
     ]);
-    setOpenMatches(open.filter(m=>m.creator_id!==user.id));
-    setMyMatches(mine);
+    const now = new Date();
+    setOpenMatches(open.filter(m=>
+      m.creator_id!==user.id &&
+      new Date(m.scheduled_at) > now
+    ));
+    const now2 = new Date();
+    setMyMatches(mine.filter(m=>{
+      // 지난 open 예약(참가자 없이 시간 지난 것)은 숨김
+      if(m.status==="open" && new Date(m.scheduled_at) < now2) return false;
+      return true;
+    }));
   };
 
   useEffect(()=>{ refresh(); },[]);
