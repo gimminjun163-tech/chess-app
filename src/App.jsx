@@ -3301,9 +3301,7 @@ function AIRoot({ user, profile, onBack, theme }) {
       try {
         await saveBotToDB(user.id, ai);
       } catch(e){
-        alert("저장 실패: "+e.message+"
-
-로그인이 만료됐을 수 있습니다. 다시 로그인해주세요.");
+        alert("저장 실패: "+e.message+"\n로그인이 만료됐을 수 있습니다. 다시 로그인해주세요.");
         return;
       }
     }
