@@ -2295,7 +2295,8 @@ function LoadScreen({ onBack, onSelect, bots }) {
         )}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:24,maxHeight:400,overflowY:"auto"}}>
           {names.map(n=>{
-            const ai = localBots[n];
+            const ai = (bots||{})[n];
+            if(!ai) return null;
             return (
               <div key={n} onClick={()=>onSelect(ai)} style={{
                 padding:"12px 16px",background:"#2d1a0a",
