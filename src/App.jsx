@@ -1929,18 +1929,26 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const r = await pollRoom(roomId);
         if(!r) return;
         roomRef.current = r;
-        // phase ref로 체크해서 클로저 문제 해결
-        if(r.status==="playing" && phaseRef.current==="waiting") {
-          phaseRef.current = "playing";
-          setPhase("playing");
-          // 상대방 프로필 즉시 로드
-          const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
-          if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
-        }
+
+        // setPhase를 함수형 업데이트로 — 항상 최신 phase 기반으로 판단
+        setPhase(prevPhase => {
+          if(r.status==="playing" && prevPhase==="waiting") {
+            // 상대방 프로필 로드
+            const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
+            if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
+            return "playing";
+          }
+          if(r.status==="finished" && prevPhase!=="result") {
+            return "result";
+          }
+          return prevPhase;
+        });
+
         if(r.board) setBoard(r.board);
         if(r.turn) setTurn(r.turn);
         if(r.last_move) { setLastMoveSq([r.last_move.from, r.last_move.to]); setLastMove(r.last_move); }
         if(r.castle_rights) setCastleRights(r.castle_rights);
+
         if(r.status==="finished") {
           clearInterval(pollRef.current);
           clearInterval(timerRef.current);
@@ -1950,7 +1958,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const drawMsg = r.result&&r.result!=="checkmate"&&r.result!=="stalemate"&&r.result!=="timeout"?` (${r.result})`:"";
           setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
           setStatus("finished");
-          setPhase("result");
           await updateRating(user.id, myChange);
         }
       } catch(e) { console.error("poll error", e); }
@@ -1998,7 +2005,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         mySideRef.current = "b";
         const opp = await getProfile(existing.white_id);
         setOppProfile(opp);
-        phaseRef.current = "playing";
         setPhase("playing");
         startPoll(existing.id);
       } else {
@@ -2007,8 +2013,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         setRoom(newRoom);
         setMySide("w");
         mySideRef.current = "w";
-        phaseRef.current = "waiting";
-        setPhase("waiting");
         startPoll(newRoom.id);
       }
     } catch(e) { alert("매칭 실패: "+e.message); setPhase("lobby"); }
@@ -2040,7 +2044,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
       mySideRef.current = "b";
       const opp = await getProfile(r.white_id);
       setOppProfile(opp);
-      phaseRef.current = "playing";
       setPhase("playing");
       startPoll(r.id);
     } catch(e) { alert("참가 실패: "+e.message); }
