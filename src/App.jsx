@@ -1892,6 +1892,9 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   const [inputCode, setInputCode] = useState("");
   const [room, setRoom] = useState(null);
   const [mySide, setMySide] = useState("w");
+  const [chatEnabled, setChatEnabled] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
   const [board, setBoard] = useState(INIT_BOARD());
   const [turn, setTurn] = useState("w");
   const [selected, setSelected] = useState(null);
@@ -1924,32 +1927,36 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
 
   const startPoll = useCallback((roomId) => {
     if(pollRef.current) clearInterval(pollRef.current);
+    let alreadyPlaying = false;
+    let alreadyFinished = false;
     pollRef.current = setInterval(async()=>{
       try {
         const r = await pollRoom(roomId);
         if(!r) return;
         roomRef.current = r;
 
-        // setPhase를 함수형 업데이트로 — 항상 최신 phase 기반으로 판단
-        setPhase(prevPhase => {
-          if(r.status==="playing" && prevPhase==="waiting") {
-            // 상대방 프로필 로드
-            const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
-            if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
-            return "playing";
-          }
-          if(r.status==="finished" && prevPhase!=="result") {
-            return "result";
-          }
-          return prevPhase;
-        });
-
+        // 항상 board/turn/castle 동기화
         if(r.board) setBoard(r.board);
         if(r.turn) setTurn(r.turn);
-        if(r.last_move) { setLastMoveSq([r.last_move.from, r.last_move.to]); setLastMove(r.last_move); }
+        if(r.last_move) {
+          setLastMoveSq([r.last_move.from, r.last_move.to]);
+          setLastMove(r.last_move);
+        }
         if(r.castle_rights) setCastleRights(r.castle_rights);
+        // 채팅 메시지 동기화
+        if(r.chat_messages) setChatMessages(r.chat_messages);
 
-        if(r.status==="finished") {
+        // playing 전환 (한번만)
+        if(r.status==="playing" && !alreadyPlaying) {
+          alreadyPlaying = true;
+          const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
+          if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
+          setPhase("playing");
+        }
+
+        // finished 전환 (한번만)
+        if(r.status==="finished" && !alreadyFinished) {
+          alreadyFinished = true;
           clearInterval(pollRef.current);
           clearInterval(timerRef.current);
           const side = mySideRef.current;
@@ -1958,10 +1965,11 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const drawMsg = r.result&&r.result!=="checkmate"&&r.result!=="stalemate"&&r.result!=="timeout"?` (${r.result})`:"";
           setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
           setStatus("finished");
+          setPhase("result");
           await updateRating(user.id, myChange);
         }
       } catch(e) { console.error("poll error", e); }
-    }, 1000);
+    }, 800);
   }, [user.id]);
 
   useEffect(()=>()=>{ if(pollRef.current) clearInterval(pollRef.current); },[]);
@@ -2303,8 +2311,55 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           side={flipped?"w":"b"} label={flipped?"상대":"나"} />
       </div>
 
+      {/* Chat section */}
+      <div style={{marginTop:12,width:500,maxWidth:"95vw"}}>
+        {!chatEnabled ? (
+          <button onClick={async()=>{
+            setChatEnabled(true);
+            if(room?.id) {
+              await supaFetch(`/rest/v1/rooms?id=eq.${room.id}`,
+                {method:"PATCH", body:JSON.stringify({chat_enabled:true})}).catch(()=>{});
+            }
+          }} style={{...smallBtn("#2d1a2a","#c06af5"),fontSize:12}}>
+            💬 채팅 허용
+          </button>
+        ) : (
+          <div style={{background:"#1a0e06",border:"1px solid #7c4a1e44",borderRadius:10,padding:"12px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{color:"#c9a96e",fontSize:13}}>💬 채팅</span>
+              <button onClick={()=>setChatEnabled(false)}
+                style={{...smallBtn("#2a1a0a","#7c6040"),fontSize:11}}>닫기</button>
+            </div>
+            <div style={{height:100,overflowY:"auto",marginBottom:8,display:"flex",flexDirection:"column",gap:4}}>
+              {chatMessages.length===0&&<p style={{color:"#7c6040",fontSize:12,textAlign:"center"}}>메시지가 없습니다</p>}
+              {chatMessages.map((m,i)=>(
+                <div key={i} style={{fontSize:12,color:m.userId===user.id?"#c9a96e":"#7ec876"}}>
+                  <span style={{fontWeight:"bold"}}>{m.username}: </span>
+                  <span>{m.text}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={chatInput} onChange={e=>setChatInput(e.target.value)}
+                onKeyDown={async e=>{
+                  if(e.key==="Enter"&&chatInput.trim()&&room?.id) {
+                    const msg = {userId:user.id, username:profile?.username||"나", text:chatInput.trim(), ts:Date.now()};
+                    const newMsgs = [...chatMessages, msg];
+                    setChatMessages(newMsgs);
+                    setChatInput("");
+                    await supaFetch(`/rest/v1/rooms?id=eq.${room.id}`,
+                      {method:"PATCH", body:JSON.stringify({chat_messages:newMsgs})}).catch(()=>{});
+                  }
+                }}
+                placeholder="메시지 입력 후 Enter"
+                style={{...inputStyle,margin:0,flex:1,fontSize:12,padding:"6px 10px"}}/>
+            </div>
+          </div>
+        )}
+      </div>
+
       <button onClick={()=>{ if(pollRef.current)clearInterval(pollRef.current); onBack(); }}
-        style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:16}}>← 나가기</button>
+        style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>← 나가기</button>
     </div>
   );
 }
