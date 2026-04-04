@@ -974,8 +974,20 @@ async function joinRoom(roomId, userId) {
 }
 
 async function findWaitingRoom(userId) {
+  // 오래된 대기 방 정리 (10분 이상 된 방)
+  const cutoff = new Date(Date.now() - 10*60*1000).toISOString();
+  await supaFetch(
+    `/rest/v1/rooms?status=eq.waiting&created_at=lt.${cutoff}`,
+    {method:"PATCH", body:JSON.stringify({status:"cancelled"})}
+  ).catch(()=>{});
   const rows = await supaFetch(`/rest/v1/rooms?status=eq.waiting&mode=eq.random&white_id=neq.${userId}&select=*&limit=1`);
   return rows?.[0]||null;
+}
+
+async function cancelRoom(roomId) {
+  if(!roomId) return;
+  await supaFetch(`/rest/v1/rooms?id=eq.${roomId}`,
+    {method:"PATCH", body:JSON.stringify({status:"cancelled"})}).catch(()=>{});
 }
 
 async function pollRoom(roomId) {
@@ -1919,17 +1931,16 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         roomRef.current = r;
         // phase ref로 체크해서 클로저 문제 해결
         if(r.status==="playing" && phaseRef.current==="waiting") {
+          phaseRef.current = "playing";
           setPhase("playing");
+          // 상대방 프로필 즉시 로드
+          const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
+          if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
         }
         if(r.board) setBoard(r.board);
         if(r.turn) setTurn(r.turn);
         if(r.last_move) { setLastMoveSq([r.last_move.from, r.last_move.to]); setLastMove(r.last_move); }
         if(r.castle_rights) setCastleRights(r.castle_rights);
-        // 상대방 프로필 불러오기
-        if(r.status==="playing" && r.white_id && r.black_id) {
-          const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
-          if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
-        }
         if(r.status==="finished") {
           clearInterval(pollRef.current);
           clearInterval(timerRef.current);
@@ -2013,14 +2024,23 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   };
 
   const joinByCode = async() => {
+    if(!inputCode.trim()) return;
     try {
-      const rows = await supaFetch(`/rest/v1/rooms?code=eq.${inputCode.toUpperCase()}&status=eq.waiting&select=*`);
+      const rows = await supaFetch(`/rest/v1/rooms?code=eq.${inputCode.trim().toUpperCase()}&select=*`);
       const r = rows?.[0];
       if(!r) { alert("방을 찾을 수 없습니다."); return; }
+      if(r.status==="cancelled") { alert("취소된 방입니다."); return; }
+      if(r.status==="finished") { alert("이미 종료된 방입니다."); return; }
+      if(r.status==="playing") { alert("이미 진행 중인 방입니다."); return; }
+      if(r.white_id===user.id) { alert("내가 만든 방입니다."); return; }
       await joinRoom(r.id, user.id);
-      setRoom(r); setMySide("b");
+      const updatedRoom = await pollRoom(r.id);
+      setRoom(updatedRoom||r);
+      setMySide("b");
+      mySideRef.current = "b";
       const opp = await getProfile(r.white_id);
       setOppProfile(opp);
+      phaseRef.current = "playing";
       setPhase("playing");
       startPoll(r.id);
     } catch(e) { alert("참가 실패: "+e.message); }
@@ -2193,8 +2213,12 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         <div style={{fontSize:48,marginBottom:16,animation:"spin 2s linear infinite"}}>⏳</div>
         <p style={{color:"#c9a96e",fontSize:18,marginBottom:8}}>상대 대기 중...</p>
         {roomCode&&<p style={{color:"#7c6040",fontSize:14}}>방 코드: <span style={{color:"#c9a96e",fontWeight:"bold",letterSpacing:3}}>{roomCode}</span></p>}
-        <button onClick={()=>{ if(pollRef.current)clearInterval(pollRef.current); setPhase("lobby"); }}
-          style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:20}}>취소</button>
+        <button onClick={async()=>{
+          if(pollRef.current) clearInterval(pollRef.current);
+          // 내가 만든 방이면 DB에서 cancelled 처리
+          if(room?.id && mySide==="w") await cancelRoom(room.id);
+          setPhase("lobby"); setRoom(null); setRoomCode("");
+        }} style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:20}}>취소</button>
         <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
       </div>
     </div>
