@@ -2530,7 +2530,8 @@ function AIManageScreen({ onBack, bots, isDemo, onRefresh, userId }) {
         {names.length===0&&<p style={{color:"#7c6040",textAlign:"center",marginBottom:20}}>저장된 AI가 없습니다.</p>}
         <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20,maxHeight:480,overflowY:"auto"}}>
           {names.map(n=>{
-            const ai = bots[n];
+            const ai = localBots[n];
+            if(!ai) return null;
             const isLoading = loading===n;
             return (
               <div key={n} style={{background:"#2d1a0a",border:`1px solid ${ai._isShared?"#6af5b033":"#7c4a1e33"}`,
