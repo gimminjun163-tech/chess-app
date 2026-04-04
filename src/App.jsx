@@ -712,18 +712,33 @@ async function loadBotsFromDB(userId) {
 }
 
 async function saveBotToDB(userId, ai) {
+  const serialized = ai.serialize();
+  // Q-table이 너무 크면 2000개로 제한
+  if(serialized.qtable) {
+    const keys = Object.keys(serialized.qtable);
+    if(keys.length > 2000) {
+      const trimmed = {};
+      keys.slice(-2000).forEach(k=>{ trimmed[k]=serialized.qtable[k]; });
+      serialized.qtable = trimmed;
+    }
+  }
   const body = {
     user_id: userId,
     name: ai.name,
     type: ai.type,
     train_count: ai.trainCount,
-    data: ai.serialize(),
+    data: serialized,
+    is_shared: ai._isShared||false,
     updated_at: new Date().toISOString(),
   };
   if(ai._dbId) {
     await supaFetch(`/rest/v1/bots?id=eq.${ai._dbId}`, {method:"PATCH", body:JSON.stringify(body)});
   } else {
-    const rows = await supaFetch(`/rest/v1/bots`, {method:"POST", headers:{"Prefer":"return=representation"}, body:JSON.stringify(body)});
+    const rows = await supaFetch(`/rest/v1/bots`, {
+      method:"POST",
+      headers:{"Prefer":"return=representation"},
+      body:JSON.stringify(body)
+    });
     if(rows?.[0]) ai._dbId = rows[0].id;
   }
 }
@@ -1890,6 +1905,11 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   const {capturedByWhite, capturedByBlack} = getCaptured(board);
   const score = getMaterialScore(capturedByWhite, capturedByBlack);
 
+  const phaseRef = useRef(phase);
+  useEffect(()=>{ phaseRef.current = phase; }, [phase]);
+  const mySideRef = useRef(mySide);
+  useEffect(()=>{ mySideRef.current = mySide; }, [mySide]);
+
   const startPoll = useCallback((roomId) => {
     if(pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async()=>{
@@ -1897,17 +1917,25 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const r = await pollRoom(roomId);
         if(!r) return;
         roomRef.current = r;
-        if(r.status==="playing"&&phase==="waiting") setPhase("playing");
+        // phase ref로 체크해서 클로저 문제 해결
+        if(r.status==="playing" && phaseRef.current==="waiting") {
+          setPhase("playing");
+        }
         if(r.board) setBoard(r.board);
         if(r.turn) setTurn(r.turn);
         if(r.last_move) { setLastMoveSq([r.last_move.from, r.last_move.to]); setLastMove(r.last_move); }
         if(r.castle_rights) setCastleRights(r.castle_rights);
+        // 상대방 프로필 불러오기
+        if(r.status==="playing" && r.white_id && r.black_id) {
+          const oppId = mySideRef.current==="w" ? r.black_id : r.white_id;
+          if(oppId) getProfile(oppId).then(p=>{ if(p) setOppProfile(p); }).catch(()=>{});
+        }
         if(r.status==="finished") {
           clearInterval(pollRef.current);
           clearInterval(timerRef.current);
-          const myChange = mySide==="w"?r.white_rating_change:r.black_rating_change;
+          const side = mySideRef.current;
+          const myChange = side==="w"?r.white_rating_change:r.black_rating_change;
           setRatingChange(myChange);
-          const isDraw = !r.winner_id;
           const drawMsg = r.result&&r.result!=="checkmate"&&r.result!=="stalemate"&&r.result!=="timeout"?` (${r.result})`:"";
           setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
           setStatus("finished");
@@ -1916,7 +1944,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         }
       } catch(e) { console.error("poll error", e); }
     }, 1000);
-  }, [phase, mySide, user.id]);
+  }, [user.id]);
 
   useEffect(()=>()=>{ if(pollRef.current) clearInterval(pollRef.current); },[]);
 
@@ -1951,15 +1979,25 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
     try {
       const existing = await findWaitingRoom(user.id);
       if(existing) {
+        // 내가 black으로 참가
         await joinRoom(existing.id, user.id);
-        setRoom(existing); setMySide("b");
+        const updatedRoom = await pollRoom(existing.id);
+        setRoom(updatedRoom||existing);
+        setMySide("b");
+        mySideRef.current = "b";
         const opp = await getProfile(existing.white_id);
         setOppProfile(opp);
+        phaseRef.current = "playing";
         setPhase("playing");
         startPoll(existing.id);
       } else {
+        // 내가 white로 방 생성 후 대기
         const newRoom = await createRoom(user.id, "random");
-        setRoom(newRoom); setMySide("w");
+        setRoom(newRoom);
+        setMySide("w");
+        mySideRef.current = "w";
+        phaseRef.current = "waiting";
+        setPhase("waiting");
         startPoll(newRoom.id);
       }
     } catch(e) { alert("매칭 실패: "+e.message); setPhase("lobby"); }
@@ -3235,7 +3273,16 @@ function AIRoot({ user, profile, onBack, theme }) {
     const nb = {...bots, [ai.name]:ai};
     setBots(nb);
     if(isDemo) saveBotsLocal(nb);
-    else { try { await saveBotToDB(user.id, ai); } catch(e){ alert("저장 실패: "+e.message); return; } }
+    else {
+      try {
+        await saveBotToDB(user.id, ai);
+      } catch(e){
+        alert("저장 실패: "+e.message+"
+
+로그인이 만료됐을 수 있습니다. 다시 로그인해주세요.");
+        return;
+      }
+    }
     setScreen("home"); setCurrentAI(null);
   };
 
