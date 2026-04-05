@@ -1887,6 +1887,8 @@ function PvPOfflineScreen({ onBack, theme }) {
 // ============================================================
 function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   const [phase, setPhase] = useState("lobby"); // lobby|waiting|playing|result
+  // roomStatus는 DB에서 직접 읽은 실제 상태
+  const [roomStatus, setRoomStatus] = useState("waiting");
   const [matchMode, setMatchMode] = useState(null); // random|room
   const [roomCode, setRoomCode] = useState("");
   const [inputCode, setInputCode] = useState("");
@@ -1945,6 +1947,9 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         if(r.castle_rights) setCastleRights(r.castle_rights);
         // 채팅 메시지 동기화
         if(r.chat_messages) setChatMessages(r.chat_messages);
+
+        // roomStatus 항상 동기화
+        setRoomStatus(r.status);
 
         // playing 전환 (한번만)
         if(r.status==="playing" && !alreadyPlaying) {
@@ -2173,6 +2178,9 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   };
 
   // Lobby
+  // playing 조건: roomStatus가 playing이거나 phase가 playing
+  const isPlaying = roomStatus==="playing" || phase==="playing";
+
   if(phase==="lobby") return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif",padding:20}}>
@@ -2216,7 +2224,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   );
 
   // Waiting
-  if(phase==="waiting") return (
+  if(phase==="waiting" && !isPlaying) return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif"}}>
       <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
@@ -2236,7 +2244,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
   );
 
   // Result
-  if(phase==="result") return (
+  if(phase==="result" || roomStatus==="finished") return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
       background:"linear-gradient(135deg,#1a0e06,#2d1a0a)",fontFamily:"Georgia,serif"}}>
       <div style={{background:"#1a0e06",border:"2px solid #7c4a1e",borderRadius:12,
@@ -2358,8 +2366,26 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         )}
       </div>
 
-      <button onClick={()=>{ if(pollRef.current)clearInterval(pollRef.current); onBack(); }}
-        style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>← 나가기</button>
+      <button onClick={async()=>{
+          if(!window.confirm("기권하시겠습니까? 패배로 처리됩니다.")) return;
+          if(pollRef.current) clearInterval(pollRef.current);
+          if(timerRef.current) clearInterval(timerRef.current);
+          // 기권 처리 - 상대방 승리
+          if(room?.id) {
+            const oppId = mySide==="w" ? room.black_id : room.white_id;
+            const oppProf = oppId ? await getProfile(oppId) : null;
+            const myRating = profile?.rating||1200;
+            const oppRating = oppProf?.rating||1200;
+            const delta = calcElo(myRating, oppRating, 0); // 패배
+            const wChange = mySide==="w" ? delta : -delta;
+            const bChange = mySide==="b" ? delta : -delta;
+            await pushMove(room.id, board, turn, lastMove, castleRights,
+              "forfeit", oppId, wChange, bChange).catch(()=>{});
+            await updateRating(user.id, delta).catch(()=>{});
+          }
+          onBack();
+        }}
+        style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>⚑ 기권 / 나가기</button>
     </div>
   );
 }
