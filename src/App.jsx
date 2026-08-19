@@ -1236,27 +1236,35 @@ function AuthScreen({ onLogin, onDemo }) {
     try {
       if(isSignup) {
         if(!username.trim()) throw new Error("닉네임을 입력하세요");
-        const signupData = await authSignUp(email, password, username.trim());
-        // 회원가입 후 세션이 바로 오는 경우 (Confirm email OFF)
-        if(signupData.access_token) {
-          _supaToken = signupData.access_token;
-          _supaUser = signupData.user;
-          await saveSession(signupData);
-          onLogin(signupData.user);
-        } else if(signupData.session?.access_token) {
-          _supaToken = signupData.session.access_token;
-          _supaUser = signupData.user;
-          await saveSession({...signupData.session, refresh_token: signupData.session.refresh_token});
-          onLogin(signupData.user);
+        // 회원가입 요청
+        const r = await fetch(SUPA_URL+"/auth/v1/signup", {
+          method:"POST",
+          headers:{"Content-Type":"application/json","apikey":SUPA_KEY},
+          body: JSON.stringify({email, password, data:{username:username.trim()}})
+        });
+        const signupData = await r.json();
+        console.log("signup response:", JSON.stringify(signupData));
+
+        if(signupData.error || signupData.code>=400) {
+          throw new Error(signupData.error?.message || signupData.msg || JSON.stringify(signupData));
+        }
+
+        // 세션 처리
+        const session = signupData.session || signupData;
+        if(session?.access_token) {
+          _supaToken = session.access_token;
+          _supaUser = signupData.user || session.user;
+          localStorage.setItem("chess_session", JSON.stringify({refresh_token: session.refresh_token}));
+          onLogin(_supaUser);
         } else {
-          // 세션 없으면 잠깐 기다렸다가 로그인 시도
-          await new Promise(r=>setTimeout(r,1000));
+          // 세션 없으면 바로 로그인 시도
+          await new Promise(res=>setTimeout(res, 500));
           try {
             const loginData = await authSignIn(email, password);
             await saveSession(loginData);
             onLogin(loginData.user);
           } catch(e) {
-            setError("회원가입 완료! 바로 로그인해주세요.");
+            setError("회원가입 완료! 로그인해주세요.");
             setIsSignup(false);
           }
         }
