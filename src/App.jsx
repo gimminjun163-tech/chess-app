@@ -1976,15 +1976,20 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const side = mySideRef.current;
           const myChange = side==="w"?r.white_rating_change:r.black_rating_change;
           setRatingChange(myChange);
-          const drawMsg = r.result&&r.result!=="checkmate"&&r.result!=="stalemate"&&r.result!=="timeout"?` (${r.result})`:"";
-          setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
+          const isForfeit = r.result==="forfeit";
+          const drawMsg = r.result&&!["checkmate","stalemate","timeout","forfeit"].includes(r.result)?` (${r.result})`:"";
+          const isWinner = r.winner_id===user.id;
+          setMessage(isWinner?"승리! 🎉":r.winner_id?(isForfeit?"기권 — 패배 😞":"패배 😞"):`무승부${drawMsg}`);
           setStatus("finished");
           setPhase("result");
-          if(r.winner_id) {
-            const isWinner = r.winner_id === user.id;
-            await updateRating(user.id, myChange, isWinner?"win":"loss");
-          } else {
-            await updateRating(user.id, 0, "draw");
+          // 기권의 경우: 기권자는 이미 처리, 상대방(winner)만 여기서 처리
+          // 일반 승패: 폴링 감지한 쪽에서 처리
+          if(!isForfeit || isWinner) {
+            if(r.winner_id) {
+              await updateRating(user.id, myChange, isWinner?"win":"loss").catch(()=>{});
+            } else {
+              await updateRating(user.id, 0, "draw").catch(()=>{});
+            }
           }
         }
       } catch(e) { console.error("poll error", e); }
@@ -2383,27 +2388,31 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
 
       <button onClick={async()=>{
           if(!window.confirm("기권하시겠습니까? 패배로 처리됩니다.")) return;
-          if(pollRef.current) clearInterval(pollRef.current);
           if(timerRef.current) clearInterval(timerRef.current);
-          // 기권 처리 - 상대방 승리
           if(room?.id) {
             const oppId = mySide==="w" ? room.black_id : room.white_id;
             const oppProf = oppId ? await getProfile(oppId) : null;
             const myRating = profile?.rating||1200;
             const oppRating = oppProf?.rating||1200;
-            // 내 패배 점수, 상대 승리 점수 각각 계산
-            const myDelta = calcElo(myRating, oppRating, 0);      // 음수
-            const oppDelta = calcElo(oppRating, myRating, 1);     // 양수
+            const myDelta = calcElo(myRating, oppRating, 0);
+            const oppDelta = calcElo(oppRating, myRating, 1);
             const wChange = mySide==="w" ? myDelta : oppDelta;
             const bChange = mySide==="b" ? myDelta : oppDelta;
+            // DB에 기권 결과 기록
             await pushMove(room.id, board, turn, lastMove, castleRights,
               "forfeit", oppId, wChange, bChange).catch(()=>{});
-            // 내 레이팅 패배 처리
+            // 레이팅 업데이트
             await updateRating(user.id, myDelta, "loss").catch(()=>{});
-            // 상대 레이팅 승리 처리 (상대방 폴링에서도 처리되지만 즉시 반영)
             if(oppId) await updateRating(oppId, oppDelta, "win").catch(()=>{});
+            // 기권한 사람도 결과 화면 표시
+            setRatingChange(myDelta);
+            setMessage("기권 — 패배 😞");
+            setStatus("finished");
+            setPhase("result");
+            if(pollRef.current) clearInterval(pollRef.current);
+          } else {
+            onBack();
           }
-          onBack();
         }}
         style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>⚑ 기권 / 나가기</button>
     </div>
