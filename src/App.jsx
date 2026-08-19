@@ -1003,29 +1003,41 @@ async function pushMove(roomId, board, turn, lastMove, castleRights, result=null
 }
 
 async function updateRating(userId, delta, result="auto") {
-  const profile = await getProfile(userId);
-  if(!profile) return;
-  const newRating = Math.max(100, (profile.rating||1200) + delta);
-  const update = {rating: newRating, updated_at: new Date().toISOString()};
-  if(result==="win" || (result==="auto" && delta > 0)) update.wins = (profile.wins||0)+1;
-  else if(result==="loss" || (result==="auto" && delta < 0)) update.losses = (profile.losses||0)+1;
-  else update.draws = (profile.draws||0)+1;
-  await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {method:"PATCH", body:JSON.stringify(update)});
-  console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
-  const data = await res.json().catch(()=>null);
+  if(!userId) { console.error("updateRating: userId가 없음"); return; }
+  if(typeof delta !== "number" || Number.isNaN(delta)) {
+    console.error("updateRating: delta가 유효하지 않음:", delta, "userId:", userId);
+    return;
+  }
+  try {
+    const profile = await getProfile(userId);
+    if(!profile) { console.error("updateRating: profile not found for", userId); return; }
 
-  if(!res.ok) {
-      console.error("updateRating FAILED:", res.status, data);
+    const newRating = Math.max(100, Math.round((profile.rating||1200) + delta));
+    if(Number.isNaN(newRating)) {
+      console.error("updateRating: newRating이 NaN. profile.rating:", profile.rating, "delta:", delta);
       return;
-  }
-  if(!data || data.length===0) {
-      // ⚠️ 응답은 200인데 실제로 바뀐 row가 0개 — RLS에 막혔을 가능성 매우 높음
-      console.error("updateRating: 0 rows updated (RLS 의심). userId:", userId, "current token user:", _supaUser?.id);
+    }
+
+    const update = {rating: newRating, updated_at: new Date().toISOString()};
+    if(result==="win" || (result==="auto" && delta > 0)) update.wins = (profile.wins||0)+1;
+    else if(result==="loss" || (result==="auto" && delta < 0)) update.losses = (profile.losses||0)+1;
+    else update.draws = (profile.draws||0)+1;
+
+    // ✅ supaFetch를 그대로 사용 — apikey가 항상 자동으로 실림
+    const data = await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
+      method:"PATCH",
+      headers:{"Prefer":"return=representation"},
+      body: JSON.stringify(update)
+    });
+
+    if(!data || data.length===0) {
+      console.error("updateRating: 0 rows updated (RLS 정책 의심). userId:", userId, "현재 로그인 사용자:", _supaUser?.id);
       return;
-  }
-  console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
+    }
+    console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
   } catch(e) {
-    console.error("updateRating exception:", e);
+    // supaFetch가 !res.ok일 때 이 catch로 들어옴 — 여기서 에러 메시지를 그대로 노출
+    console.error("updateRating FAILED:", e.message);
   }
 }
 
