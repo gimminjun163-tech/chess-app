@@ -1012,6 +1012,21 @@ async function updateRating(userId, delta, result="auto") {
   else update.draws = (profile.draws||0)+1;
   await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {method:"PATCH", body:JSON.stringify(update)});
   console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
+  const data = await res.json().catch(()=>null);
+
+  if(!res.ok) {
+      console.error("updateRating FAILED:", res.status, data);
+      return;
+  }
+  if(!data || data.length===0) {
+      // ⚠️ 응답은 200인데 실제로 바뀐 row가 0개 — RLS에 막혔을 가능성 매우 높음
+      console.error("updateRating: 0 rows updated (RLS 의심). userId:", userId, "current token user:", _supaUser?.id);
+      return;
+  }
+  console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
+  } catch(e) {
+    console.error("updateRating exception:", e);
+  }
 }
 
 // ============================================================
