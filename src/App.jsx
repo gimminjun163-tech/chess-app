@@ -2136,6 +2136,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const lossDelta=calcElo(oppRating,myRating,0); // 상대 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
+        console.log(`${profile?.id} + ${wChange}, ${oppProf?.profile} + ${bChange}`);
       }
     } else {
       // Check other draw conditions
