@@ -134,6 +134,7 @@ function getValidMoves(board, r, c, lastMove, castleRights) {
     const nb=applyMove(board,m);
     if(isInCheck(nb,side)) return false;
     if(m.castle) {
+      // 체크 상태에서는 캐슬링 불가
       if(isInCheck(board,side)) return false;
       // Cannot castle if king passes through an attacked square
       const midC = m.castle==="k"?5:3;
@@ -621,15 +622,69 @@ function createTrainWorker() {
 const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+let _supaToken = null;
+let _supaUser = null;
+
+// 세션의 refresh_token으로 액세스 토큰을 새로 발급받는다.
+// JWT 만료(401)로 요청이 실패했을 때 supaFetch가 자동으로 호출한다.
+async function refreshAccessToken() {
+  try {
+    const s = JSON.parse(localStorage.getItem("chess_session")||"null");
+    if(!s?.refresh_token) return false;
+    const r = await fetch(SUPA_URL+"/auth/v1/token?grant_type=refresh_token", {
+      method:"POST", headers:{"Content-Type":"application/json","apikey":SUPA_KEY},
+      body: JSON.stringify({refresh_token: s.refresh_token})
+    });
+    const d = await r.json();
+    if(d.error || !d.access_token) {
+      console.error("refreshAccessToken 실패:", d.error||d);
+      return false;
+    }
+    _supaToken = d.access_token;
+    _supaUser = d.user;
+    localStorage.setItem("chess_session", JSON.stringify({refresh_token: d.refresh_token}));
+    console.log("토큰 갱신 성공");
+    return true;
+  } catch(e) {
+    console.error("refreshAccessToken exception:", e);
+    return false;
+  }
+}
+
 async function supaFetch(path, opts={}) {
-  const headers = { "Content-Type":"application/json", "apikey":SUPA_KEY, "Authorization":"Bearer "+supaToken(), ...opts.headers };
-  const res = await fetch(SUPA_URL+path, {...opts, headers});
-  if(!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.message||res.statusText); }
+  // apikey를 URL 쿼리파라미터로도 추가 — 헤더가 어떤 이유로든 유실되더라도
+  // 인증이 통과되도록 하는 이중 안전장치
+  const sep = path.includes("?") ? "&" : "?";
+  const urlWithKey = `${SUPA_URL}${path}${sep}apikey=${encodeURIComponent(SUPA_KEY)}`;
+
+  const doRequest = () => {
+    const headers = { "Content-Type":"application/json", "apikey":SUPA_KEY, "Authorization":"Bearer "+supaToken(), ...opts.headers };
+    return fetch(urlWithKey, {...opts, headers});
+  };
+
+  let res = await doRequest();
+
+  // JWT 만료 등 인증 오류면, refresh_token으로 토큰을 갱신한 뒤 한 번 재시도
+  if(res.status === 401) {
+    const errBody = await res.clone().json().catch(()=>({}));
+    const isExpired = /jwt expired|invalid.*token|pgrst301/i.test(errBody.message||errBody.msg||"");
+    if(isExpired) {
+      console.warn("토큰 만료 감지, 갱신 후 재시도:", path);
+      const refreshed = await refreshAccessToken();
+      if(refreshed) {
+        res = await doRequest();
+      }
+    }
+  }
+
+  if(!res.ok) {
+    const e = await res.json().catch(()=>({}));
+    console.error(`supaFetch FAILED [${opts.method||"GET"} ${path}]:`, res.status, e.message||res.statusText);
+    throw new Error(e.message||res.statusText);
+  }
   return res.json().catch(()=>null);
 }
 function supaToken() { return _supaToken||SUPA_KEY; }
-let _supaToken = null;
-let _supaUser = null;
 
 async function authSignUp(email, password, username) {
   if(!SUPA_URL || !SUPA_KEY) throw new Error("Supabase 환경변수가 설정되지 않았습니다.");
@@ -1002,6 +1057,8 @@ async function pushMove(roomId, board, turn, lastMove, castleRights, result=null
   await supaFetch(`/rest/v1/rooms?id=eq.${roomId}`, {method:"PATCH", body:JSON.stringify(body)});
 }
 
+// 자기 자신의 레이팅만 안전하게 업데이트 (own row라 RLS 통과).
+// 무승부 처리, 그리고 승/패 결과를 만든 클라이언트가 없는 예외 상황의 폴백용으로 사용.
 async function updateRating(userId, delta, result="auto") {
   if(!userId) { console.error("updateRating: userId가 없음"); return; }
   if(typeof delta !== "number" || Number.isNaN(delta)) {
@@ -1011,47 +1068,54 @@ async function updateRating(userId, delta, result="auto") {
   try {
     const profile = await getProfile(userId);
     if(!profile) { console.error("updateRating: profile not found for", userId); return; }
-
     const newRating = Math.max(100, Math.round((profile.rating||1200) + delta));
-    if(Number.isNaN(newRating)) {
-      console.error("updateRating: newRating이 NaN. profile.rating:", profile.rating, "delta:", delta);
-      return;
-    }
-
     const update = {rating: newRating, updated_at: new Date().toISOString()};
     if(result==="win" || (result==="auto" && delta > 0)) update.wins = (profile.wins||0)+1;
     else if(result==="loss" || (result==="auto" && delta < 0)) update.losses = (profile.losses||0)+1;
     else update.draws = (profile.draws||0)+1;
-
-    // ✅ supaFetch를 그대로 사용 — apikey가 항상 자동으로 실림
     const data = await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {
       method:"PATCH",
       headers:{"Prefer":"return=representation"},
-      body: JSON.stringify(update)
+      body:JSON.stringify(update)
     });
-
     if(!data || data.length===0) {
       console.error("updateRating: 0 rows updated (RLS 정책 의심). userId:", userId, "현재 로그인 사용자:", _supaUser?.id);
       return;
     }
     console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
   } catch(e) {
-    // supaFetch가 !res.ok일 때 이 catch로 들어옴 — 여기서 에러 메시지를 그대로 노출
-    console.error("updateRating FAILED:", e.message);
+    console.error("updateRating exception:", e.message);
   }
 }
+
+// 승자/패자(또는 무승부 양측)의 레이팅을 서버 RPC(apply_match_result)로 한 번에 원자적으로 반영.
+// 클라이언트가 "내 토큰으로 남의 프로필 row"를 직접 고치려 하면 RLS에 막혀 조용히 실패하므로
+// (예: 체크메이트를 낸 사람이 상대 프로필을 직접 고치려던 것, 기권자가 승자 프로필을 직접 고치려던 것),
+// 대신 security definer로 만든 apply_match_result RPC를 통해 서버 쪽에서 양쪽을 함께 처리한다.
+// (Supabase SQL Editor에서 apply_match_result 함수를 먼저 생성해둬야 함)
 async function applyMatchResult(winnerId, loserId, winnerDelta, loserDelta, isDraw=false) {
-  return supaFetch(`/rest/v1/rpc/apply_match_result`, {
-    method: "POST",
-    body: JSON.stringify({
-      p_winner_id: winnerId,
-      p_loser_id: loserId,
-      p_winner_delta: winnerDelta,
-      p_loser_delta: loserDelta,
-      p_is_draw: isDraw
-    })
-  });
+  if(!winnerId || !loserId) { console.error("applyMatchResult: winnerId/loserId 누락"); return; }
+  if(typeof winnerDelta !== "number" || Number.isNaN(winnerDelta) ||
+     typeof loserDelta !== "number" || Number.isNaN(loserDelta)) {
+    console.error("applyMatchResult: delta 값이 유효하지 않음:", winnerDelta, loserDelta);
+    return;
+  }
+  try {
+    await supaFetch(`/rest/v1/rpc/apply_match_result`, {
+      method:"POST",
+      body: JSON.stringify({
+        p_winner_id: winnerId,
+        p_loser_id: loserId,
+        p_winner_delta: winnerDelta,
+        p_loser_delta: loserDelta,
+        p_is_draw: isDraw
+      })
+    });
+  } catch(e) {
+    console.error("applyMatchResult 실패:", e.message);
+  }
 }
+
 // ============================================================
 // STORAGE (localStorage for offline / demo)
 // ============================================================
@@ -2021,15 +2085,14 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           setMessage(isWinner?"승리! 🎉":r.winner_id?(isForfeit?"기권 — 패배 😞":"패배 😞"):`무승부${drawMsg}`);
           setStatus("finished");
           setPhase("result");
-          // ✅ 승/패 레이팅 반영은 이제 결과를 만든 쪽(체크메이트를 낸 사람/기권자/시간초과 당한 사람)이
-          // apply_match_result RPC로 양쪽을 한 번에 원자적으로 처리하므로,
-          // 여기서 다시 updateRating을 호출하지 않는다.
-          // (RLS 때문에 상대 row를 직접 못 고치는 문제, 승자 쪽 반영 누락 문제를 모두 해결)
+          // 승/패 레이팅 반영은 이제 결과를 만든 쪽(체크메이트를 낸 사람 / 기권자 / 시간초과 당한 사람)이
+          // apply_match_result RPC로 승자·패자를 한 번에 원자적으로 처리한다.
+          // 여기서 다시 updateRating을 호출하면 (내 토큰으로 상대 row는 RLS에 막혀 실패하고,
+          // 반대로 자기 자신 것만 또 호출하면 이중 반영 위험이 있으므로) 더 이상 호출하지 않는다.
+          // 단, 무승부는 각자 자기 자신의 draws 카운트만 안전하게 올린다 (own row라 RLS 통과).
           if(!r.winner_id) {
-            // 무승부는 각자 자기 자신의 draws 카운트만 안전하게 올림 (own row라 RLS 통과, 문제 없음)
             await updateRating(user.id, 0, "draw").catch(()=>{});
           }
-        }
         }
       } catch(e) { console.error("poll error", e); }
     }, 800);
@@ -2053,13 +2116,13 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const bChange = mySide==="b"?-16:16;
           pushMove(roomRef.current?.id, board, turn, lastMove, castleRights,
             "timeout", oppId, wChange, bChange).catch(()=>{});
-          // ✅ 시간초과로 진 나와, 이긴 상대의 레이팅을 RPC로 한 번에 반영
+          // 시간초과로 진 나(패자)와 이긴 상대(승자)의 레이팅을 RPC로 한 번에 원자적으로 반영.
+          // (RLS 때문에 내 토큰으로 상대 row를 직접 못 고치므로, 결과를 만든 이 클라이언트가
+          //  apply_match_result를 통해 서버 쪽에서 양쪽을 함께 처리하도록 한다.)
           if(oppId) {
-            const myDelta = mySide==="w"?wChange:bChange;   // 나의 변화(-16)
-            const oppDelta = mySide==="w"?bChange:wChange;  // 상대의 변화(+16)
-            applyMatchResult(oppId, user.id, oppDelta, myDelta, false).catch(e=>{
-              console.error("applyMatchResult 실패:", e.message);
-            });
+            const myDelta = mySide==="w"?wChange:bChange;   // 나의 변화 (-16)
+            const oppDelta = mySide==="w"?bChange:wChange;  // 상대의 변화 (+16)
+            applyMatchResult(oppId, user.id, oppDelta, myDelta, false);
           }
           setMessage("시간 초과 — 패배 😞");
           setStatus("timeout");
@@ -2168,7 +2231,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
     const hash = boardHash(nb, opp, newCR);
     posHistRef.current[hash]=(posHistRef.current[hash]||0)+1;
 
-const nextMoves=getAllValidMoves(nb,opp,move,newCR);
+    const nextMoves=getAllValidMoves(nb,opp,move,newCR);
     let result=null, winnerId=null, wChange=0, bChange=0;
     if(!nextMoves.length){
       const inChk=isInCheck(nb,opp);
@@ -2183,11 +2246,11 @@ const nextMoves=getAllValidMoves(nb,opp,move,newCR);
         const lossDelta=calcElo(oppRating,myRating,0); // 상대가 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
-        // ✅ 승자(나)/패자(상대) 레이팅을 RPC로 한 번에 원자적으로 반영 (RLS 우회)
+        // 승자(나)/패자(상대)의 레이팅을 RPC로 한 번에 원자적으로 반영 (RLS 우회).
+        // 예전 코드는 내 토큰으로 상대 프로필(row)을 직접 PATCH하려다 RLS에 막혀
+        // "이긴 쪽만 반영 안 되는" 문제가 있었음 — 이제 apply_match_result 서버 함수로 처리.
         if(oppId) {
-          await applyMatchResult(user.id, oppId, delta, lossDelta, false).catch(e=>{
-            console.error("applyMatchResult 실패:", e.message);
-          });
+          applyMatchResult(user.id, oppId, delta, lossDelta, false);
         }
       }
     } else {
@@ -2454,12 +2517,11 @@ const nextMoves=getAllValidMoves(nb,opp,move,newCR);
             // DB에 기권 결과 기록
             await pushMove(room.id, board, turn, lastMove, castleRights,
               "forfeit", oppId, wChange, bChange).catch(()=>{});
-            // ✅ 승자(oppId)/패자(나) 레이팅을 RPC로 한 번에 원자적으로 반영
-            // (RLS 때문에 상대방 row를 직접 못 고쳐서 승자 쪽이 반영 안 되던 문제 해결)
+            // 승자(oppId)/패자(나)의 레이팅을 RPC로 한 번에 원자적으로 반영.
+            // 예전 코드는 내 토큰으로 승자(oppId) row를 직접 고치려다 RLS에 막혀
+            // "진 쪽만 반영되고 이긴 쪽은 반영 안 되는" 문제가 있었음.
             if(oppId) {
-              await applyMatchResult(oppId, user.id, oppDelta, myDelta, false).catch(e=>{
-                console.error("applyMatchResult 실패:", e.message);
-              });
+              await applyMatchResult(oppId, user.id, oppDelta, myDelta, false);
             }
             // 기권한 사람도 결과 화면 표시
             setRatingChange(myDelta);
@@ -2472,6 +2534,7 @@ const nextMoves=getAllValidMoves(nb,opp,move,newCR);
           }
         }}
         style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>⚑ 기권 / 나가기</button>
+    </div>
   );
 }
 
