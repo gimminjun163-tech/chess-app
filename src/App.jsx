@@ -798,42 +798,42 @@ function calcElo(ratingA, ratingB, resultA) {
 // LEVEL SYSTEM
 // ============================================================
 const LEVELS = [
-  // Bronze
-  {tier:"Bronze",  num:1, min:0,    max:199,  color:"#cd7f32", bg:"#3a1a00"},
-  {tier:"Bronze",  num:2, min:200,  max:399,  color:"#cd7f32", bg:"#3a1a00"},
+  // Bronze (5가 낮고 1이 높음 - solved.ac 방식)
+  {tier:"Bronze",  num:5, min:0,    max:199,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:4, min:200,  max:399,  color:"#cd7f32", bg:"#3a1a00"},
   {tier:"Bronze",  num:3, min:400,  max:599,  color:"#cd7f32", bg:"#3a1a00"},
-  {tier:"Bronze",  num:4, min:600,  max:799,  color:"#cd7f32", bg:"#3a1a00"},
-  {tier:"Bronze",  num:5, min:800,  max:999,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:2, min:600,  max:799,  color:"#cd7f32", bg:"#3a1a00"},
+  {tier:"Bronze",  num:1, min:800,  max:999,  color:"#cd7f32", bg:"#3a1a00"},
   // Silver
-  {tier:"Silver",  num:1, min:1000, max:1099, color:"#aaaaaa", bg:"#2a2a2a"},
-  {tier:"Silver",  num:2, min:1100, max:1199, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:5, min:1000, max:1099, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:4, min:1100, max:1199, color:"#aaaaaa", bg:"#2a2a2a"},
   {tier:"Silver",  num:3, min:1200, max:1299, color:"#aaaaaa", bg:"#2a2a2a"},
-  {tier:"Silver",  num:4, min:1300, max:1399, color:"#aaaaaa", bg:"#2a2a2a"},
-  {tier:"Silver",  num:5, min:1400, max:1499, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:2, min:1300, max:1399, color:"#aaaaaa", bg:"#2a2a2a"},
+  {tier:"Silver",  num:1, min:1400, max:1499, color:"#aaaaaa", bg:"#2a2a2a"},
   // Gold
-  {tier:"Gold",    num:1, min:1500, max:1599, color:"#ffd700", bg:"#3a2e00"},
-  {tier:"Gold",    num:2, min:1600, max:1699, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:5, min:1500, max:1599, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:4, min:1600, max:1699, color:"#ffd700", bg:"#3a2e00"},
   {tier:"Gold",    num:3, min:1700, max:1799, color:"#ffd700", bg:"#3a2e00"},
-  {tier:"Gold",    num:4, min:1800, max:1899, color:"#ffd700", bg:"#3a2e00"},
-  {tier:"Gold",    num:5, min:1900, max:1999, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:2, min:1800, max:1899, color:"#ffd700", bg:"#3a2e00"},
+  {tier:"Gold",    num:1, min:1900, max:1999, color:"#ffd700", bg:"#3a2e00"},
   // Platinum
-  {tier:"Platinum",num:1, min:2000, max:2099, color:"#00e5cc", bg:"#003a35"},
-  {tier:"Platinum",num:2, min:2100, max:2199, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:5, min:2000, max:2099, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:4, min:2100, max:2199, color:"#00e5cc", bg:"#003a35"},
   {tier:"Platinum",num:3, min:2200, max:2299, color:"#00e5cc", bg:"#003a35"},
-  {tier:"Platinum",num:4, min:2300, max:2399, color:"#00e5cc", bg:"#003a35"},
-  {tier:"Platinum",num:5, min:2400, max:2499, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:2, min:2300, max:2399, color:"#00e5cc", bg:"#003a35"},
+  {tier:"Platinum",num:1, min:2400, max:2499, color:"#00e5cc", bg:"#003a35"},
   // Diamond
-  {tier:"Diamond", num:1, min:2500, max:2599, color:"#00bfff", bg:"#001a3a"},
-  {tier:"Diamond", num:2, min:2600, max:2699, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:5, min:2500, max:2599, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:4, min:2600, max:2699, color:"#00bfff", bg:"#001a3a"},
   {tier:"Diamond", num:3, min:2700, max:2799, color:"#00bfff", bg:"#001a3a"},
-  {tier:"Diamond", num:4, min:2800, max:2899, color:"#00bfff", bg:"#001a3a"},
-  {tier:"Diamond", num:5, min:2900, max:2999, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:2, min:2800, max:2899, color:"#00bfff", bg:"#001a3a"},
+  {tier:"Diamond", num:1, min:2900, max:2999, color:"#00bfff", bg:"#001a3a"},
   // Ruby
-  {tier:"Ruby",    num:1, min:3000, max:3099, color:"#ff4466", bg:"#3a0010"},
-  {tier:"Ruby",    num:2, min:3100, max:3199, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:5, min:3000, max:3099, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:4, min:3100, max:3199, color:"#ff4466", bg:"#3a0010"},
   {tier:"Ruby",    num:3, min:3200, max:3299, color:"#ff4466", bg:"#3a0010"},
-  {tier:"Ruby",    num:4, min:3300, max:3399, color:"#ff4466", bg:"#3a0010"},
-  {tier:"Ruby",    num:5, min:3400, max:3499, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:2, min:3300, max:3399, color:"#ff4466", bg:"#3a0010"},
+  {tier:"Ruby",    num:1, min:3400, max:3499, color:"#ff4466", bg:"#3a0010"},
   // Max
   {tier:"Max",     num:0, min:3500, max:Infinity, color:"#00c853", bg:"#003a15"},
 ];
@@ -1001,15 +1001,16 @@ async function pushMove(roomId, board, turn, lastMove, castleRights, result=null
   await supaFetch(`/rest/v1/rooms?id=eq.${roomId}`, {method:"PATCH", body:JSON.stringify(body)});
 }
 
-async function updateRating(userId, delta) {
+async function updateRating(userId, delta, result="auto") {
   const profile = await getProfile(userId);
   if(!profile) return;
-  const newRating = Math.max(100, profile.rating + delta);
+  const newRating = Math.max(100, (profile.rating||1200) + delta);
   const update = {rating: newRating, updated_at: new Date().toISOString()};
-  if(delta > 0) update.wins = (profile.wins||0)+1;
-  else if(delta < 0) update.losses = (profile.losses||0)+1;
+  if(result==="win" || (result==="auto" && delta > 0)) update.wins = (profile.wins||0)+1;
+  else if(result==="loss" || (result==="auto" && delta < 0)) update.losses = (profile.losses||0)+1;
   else update.draws = (profile.draws||0)+1;
   await supaFetch(`/rest/v1/profiles?id=eq.${userId}`, {method:"PATCH", body:JSON.stringify(update)});
+  console.log(`Rating updated: ${profile.rating} → ${newRating} (${delta>0?"+":""}${delta})`);
 }
 
 // ============================================================
@@ -1979,7 +1980,12 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           setMessage(r.winner_id===user.id?"승리! 🎉":r.winner_id?`패배 😞`:`무승부${drawMsg}`);
           setStatus("finished");
           setPhase("result");
-          await updateRating(user.id, myChange);
+          if(r.winner_id) {
+            const isWinner = r.winner_id === user.id;
+            await updateRating(user.id, myChange, isWinner?"win":"loss");
+          } else {
+            await updateRating(user.id, 0, "draw");
+          }
         }
       } catch(e) { console.error("poll error", e); }
     }, 800);
@@ -2120,10 +2126,11 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const oppId=mySide==="w"?roomRef.current?.black_id:roomRef.current?.white_id;
         const oppProf=oppId?await getProfile(oppId):null;
         const myRating=profile?.rating||1200;
-        const oppRating=oppProf?.rating||1200;
-        const delta=calcElo(myRating,oppRating,1);
-        if(mySide==="w"){ wChange=delta; bChange=-delta; }
-        else { bChange=delta; wChange=-delta; }
+        const oppRating=(oppProf?.rating)||1200;
+        const delta=calcElo(myRating,oppRating,1);    // 내가 이긴 경우
+        const lossDelta=calcElo(oppRating,myRating,0); // 상대 진 경우
+        if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
+        else { bChange=delta; wChange=lossDelta; }
       }
     } else {
       // Check other draw conditions
