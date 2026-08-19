@@ -1040,7 +1040,18 @@ async function updateRating(userId, delta, result="auto") {
     console.error("updateRating FAILED:", e.message);
   }
 }
-
+async function applyMatchResult(winnerId, loserId, winnerDelta, loserDelta, isDraw=false) {
+  return supaFetch(`/rest/v1/rpc/apply_match_result`, {
+    method: "POST",
+    body: JSON.stringify({
+      p_winner_id: winnerId,
+      p_loser_id: loserId,
+      p_winner_delta: winnerDelta,
+      p_loser_delta: loserDelta,
+      p_is_draw: isDraw
+    })
+  });
+}
 // ============================================================
 // STORAGE (localStorage for offline / demo)
 // ============================================================
@@ -2010,15 +2021,15 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           setMessage(isWinner?"승리! 🎉":r.winner_id?(isForfeit?"기권 — 패배 😞":"패배 😞"):`무승부${drawMsg}`);
           setStatus("finished");
           setPhase("result");
-          // 기권의 경우: 기권자는 이미 처리, 상대방(winner)만 여기서 처리
-          // 일반 승패: 폴링 감지한 쪽에서 처리
-          if(!isForfeit || isWinner) {
-            if(r.winner_id) {
-              await updateRating(user.id, myChange, isWinner?"win":"loss").catch(()=>{});
-            } else {
-              await updateRating(user.id, 0, "draw").catch(()=>{});
-            }
+          // ✅ 승/패 레이팅 반영은 이제 결과를 만든 쪽(체크메이트를 낸 사람/기권자/시간초과 당한 사람)이
+          // apply_match_result RPC로 양쪽을 한 번에 원자적으로 처리하므로,
+          // 여기서 다시 updateRating을 호출하지 않는다.
+          // (RLS 때문에 상대 row를 직접 못 고치는 문제, 승자 쪽 반영 누락 문제를 모두 해결)
+          if(!r.winner_id) {
+            // 무승부는 각자 자기 자신의 draws 카운트만 안전하게 올림 (own row라 RLS 통과, 문제 없음)
+            await updateRating(user.id, 0, "draw").catch(()=>{});
           }
+        }
         }
       } catch(e) { console.error("poll error", e); }
     }, 800);
@@ -2042,6 +2053,14 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const bChange = mySide==="b"?-16:16;
           pushMove(roomRef.current?.id, board, turn, lastMove, castleRights,
             "timeout", oppId, wChange, bChange).catch(()=>{});
+          // ✅ 시간초과로 진 나와, 이긴 상대의 레이팅을 RPC로 한 번에 반영
+          if(oppId) {
+            const myDelta = mySide==="w"?wChange:bChange;   // 나의 변화(-16)
+            const oppDelta = mySide==="w"?bChange:wChange;  // 상대의 변화(+16)
+            applyMatchResult(oppId, user.id, oppDelta, myDelta, false).catch(e=>{
+              console.error("applyMatchResult 실패:", e.message);
+            });
+          }
           setMessage("시간 초과 — 패배 😞");
           setStatus("timeout");
           return 0;
@@ -2149,7 +2168,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
     const hash = boardHash(nb, opp, newCR);
     posHistRef.current[hash]=(posHistRef.current[hash]||0)+1;
 
-    const nextMoves=getAllValidMoves(nb,opp,move,newCR);
+const nextMoves=getAllValidMoves(nb,opp,move,newCR);
     let result=null, winnerId=null, wChange=0, bChange=0;
     if(!nextMoves.length){
       const inChk=isInCheck(nb,opp);
@@ -2164,6 +2183,12 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const lossDelta=calcElo(oppRating,myRating,0); // 상대가 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
+        // ✅ 승자(나)/패자(상대) 레이팅을 RPC로 한 번에 원자적으로 반영 (RLS 우회)
+        if(oppId) {
+          await applyMatchResult(user.id, oppId, delta, lossDelta, false).catch(e=>{
+            console.error("applyMatchResult 실패:", e.message);
+          });
+        }
       }
     } else {
       // Check other draw conditions
@@ -2429,9 +2454,13 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
             // DB에 기권 결과 기록
             await pushMove(room.id, board, turn, lastMove, castleRights,
               "forfeit", oppId, wChange, bChange).catch(()=>{});
-            // 레이팅 업데이트
-            await updateRating(user.id, myDelta, "loss").catch(()=>{});
-            if(oppId) await updateRating(oppId, oppDelta, "win").catch(()=>{});
+            // ✅ 승자(oppId)/패자(나) 레이팅을 RPC로 한 번에 원자적으로 반영
+            // (RLS 때문에 상대방 row를 직접 못 고쳐서 승자 쪽이 반영 안 되던 문제 해결)
+            if(oppId) {
+              await applyMatchResult(oppId, user.id, oppDelta, myDelta, false).catch(e=>{
+                console.error("applyMatchResult 실패:", e.message);
+              });
+            }
             // 기권한 사람도 결과 화면 표시
             setRatingChange(myDelta);
             setMessage("기권 — 패배 😞");
@@ -2443,7 +2472,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           }
         }}
         style={{...btnStyle("#7c4a1e","#c9a96e"),marginTop:12}}>⚑ 기권 / 나가기</button>
-    </div>
   );
 }
 
