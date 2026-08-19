@@ -134,6 +134,7 @@ function getValidMoves(board, r, c, lastMove, castleRights) {
     const nb=applyMove(board,m);
     if(isInCheck(nb,side)) return false;
     if(m.castle) {
+      if(isInCheck(board,side)) return false;
       // Cannot castle if king passes through an attacked square
       const midC = m.castle==="k"?5:3;
       const nb2=applyMove(board,{from:m.from,to:[m.from[0],midC]});
@@ -2136,8 +2137,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const lossDelta=calcElo(oppRating,myRating,0); // 상대가 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
-        await updateRating(roomRek.current?.white_id,wChange,"auto").catch(()=>{});
-        await updateRating(roomRek.current?.black_id,bChange,"auto").catch(()=>{});
       }
     } else {
       // Check other draw conditions
