@@ -2128,7 +2128,6 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
       result=inChk?"checkmate":"stalemate";
       if(inChk){
         winnerId=user.id;
-        console.log(`${profile?.id} + ${wChange}, ${oppProf?.profile} + ${bChange}`);
         const oppId=mySide==="w"?roomRef.current?.black_id:roomRef.current?.white_id;
         const oppProf=oppId?await getProfile(oppId):null;
         const myRating=profile?.rating||1200;
@@ -2137,6 +2136,8 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const lossDelta=calcElo(oppRating,myRating,0); // 상대 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
+        profile?.rating+=wChange;
+        oppProf?.rating+=bChange;
       }
     } else {
       // Check other draw conditions
