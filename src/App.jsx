@@ -2391,12 +2391,17 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
             const oppProf = oppId ? await getProfile(oppId) : null;
             const myRating = profile?.rating||1200;
             const oppRating = oppProf?.rating||1200;
-            const delta = calcElo(myRating, oppRating, 0); // 패배
-            const wChange = mySide==="w" ? delta : -delta;
-            const bChange = mySide==="b" ? delta : -delta;
+            // 내 패배 점수, 상대 승리 점수 각각 계산
+            const myDelta = calcElo(myRating, oppRating, 0);      // 음수
+            const oppDelta = calcElo(oppRating, myRating, 1);     // 양수
+            const wChange = mySide==="w" ? myDelta : oppDelta;
+            const bChange = mySide==="b" ? myDelta : oppDelta;
             await pushMove(room.id, board, turn, lastMove, castleRights,
               "forfeit", oppId, wChange, bChange).catch(()=>{});
-            await updateRating(user.id, delta).catch(()=>{});
+            // 내 레이팅 패배 처리
+            await updateRating(user.id, myDelta, "loss").catch(()=>{});
+            // 상대 레이팅 승리 처리 (상대방 폴링에서도 처리되지만 즉시 반영)
+            if(oppId) await updateRating(oppId, oppDelta, "win").catch(()=>{});
           }
           onBack();
         }}
