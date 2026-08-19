@@ -1977,7 +1977,7 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
           const myChange = side==="w"?r.white_rating_change:r.black_rating_change;
           setRatingChange(myChange);
           const isForfeit = r.result==="forfeit";
-          const drawMsg = r.result&&!["checkmate","stalemate","timeout","forfeit"].includes(r.result)?` (${r.result})`:"";
+          const drawMsg = r.result&&!["checkmate","","timeout","forfeit"].includes(r.result)?` (${r.result})`:"";
           const isWinner = r.winner_id===user.id;
           setMessage(isWinner?"승리! 🎉":r.winner_id?(isForfeit?"기권 — 패배 😞":"패배 😞"):`무승부${drawMsg}`);
           setStatus("finished");
@@ -2133,11 +2133,11 @@ function PvPOnlineScreen({ onBack, user, profile, theme, onScheduled=()=>{} }) {
         const myRating=profile?.rating||1200;
         const oppRating=(oppProf?.rating)||1200;
         const delta=calcElo(myRating,oppRating,1);    // 내가 이긴 경우
-        const lossDelta=calcElo(oppRating,myRating,0); // 상대 진 경우
+        const lossDelta=calcElo(oppRating,myRating,0); // 상대가 진 경우
         if(mySide==="w"){ wChange=delta; bChange=lossDelta; }
         else { bChange=delta; wChange=lossDelta; }
-        profile?.rating+=wChange;
-        oppProf?.rating+=bChange;
+        await updateRating(roomRek.current?.white_id,wChange,"auto").catch(()=>{});
+        await updateRating(roomRek.current?.black_id,bChange,"auto").catch(()=>{});
       }
     } else {
       // Check other draw conditions
