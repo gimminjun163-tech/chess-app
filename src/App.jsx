@@ -755,14 +755,13 @@ class GreedyAI {
 //   1. 포획 판단: 방어되고 있는 기물이라도, 교환 손익
 //      (잡는 기물 값 - (되잡힐 경우 잃는 내 기물 값))이 순이익이면 잡는다.
 //      (방어가 없으면 그리디와 동일하게 그냥 이득 = 잡는 기물 값)
-//   2. 위협 대응: 위협받는 내 기물마다
-//      danger = min((공격 기물 값) - (당하는 기물 값), 0) 로 위험도를 매기고
-//      (방어자가 아예 없으면 danger = -내 기물 값, 즉 전부 손해),
-//      가장 위험한(danger가 가장 음수인) 기물부터, 모든 합법수를 시뮬레이션해서
-//      그 기물의 danger를 가장 크게 개선시키는 수를 고른다.
-//      — 그 기물을 옮기는 것(회피), 방어자를 붙이는 것, 공격 기물을 잡거나
-//        막는 것을 전부 "결과 danger가 얼마나 좋아지는가"라는 같은 기준으로 비교하므로
-//        "보호할지 피할지"를 별도로 분기하지 않아도 자연스럽게 최선의 방법이 선택된다.
+//   2. 이득 나는 포획이 없으면, 포획이든 조용한 수든 구분하지 않고
+//      "이 수를 둔 뒤 잡혔을 때의 순이익"까지 반영한 보드 전체 위험도
+//      (모든 내 기물에 대한 danger = min(공격 기물 값 - 당하는 기물 값, 0)의 합,
+//       방어자가 아예 없으면 danger = -내 기물 값)이 가장 덜 나쁜(0에 가장 가까운)
+//      수를 고른다. 즉 "움직여서 잡혔을 때 순이익인지"가 회피/방어/조용한 수
+//      전부에 동일한 기준으로 반영되므로, 별도로 "안전한 수만 필터링"하거나
+//      "위협받는 기물 하나만 구제"하는 식으로 나누지 않아도 된다.
 // ============================================================
 
 // (r,c) 칸을 bySide 진영이 공격 중인 기물들의 가치 목록
@@ -793,6 +792,20 @@ function pieceDanger(board, r, c, side) {
   if(defenders===0) return -pieceVal; // 보호 불가 — 잡히면 전부 손해
   const cheapestAttacker = Math.min(...atkVals);
   return Math.min(cheapestAttacker - pieceVal, 0);
+}
+
+// side가 가진 모든 기물에 대해 pieceDanger(음수만)를 합산한 "보드 전체 위험도".
+// 0이면 완전히 안전, 음수면 그 절댓값만큼 순손실 위험이 있다는 뜻(방어 여부까지 반영됨).
+// 포획이든 조용한 수든 상관없이 "이 수를 둔 뒤 내 기물이 잡히면 순이익이 어떻게 되는가"를
+// 모든 수에 대해 동일한 기준으로 비교할 수 있게 해준다.
+function totalDangerAfter(board, side) {
+  let total = 0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+    const p = board[r][c];
+    if(!p || color(p)!==side || p[1]==="K") continue;
+    total += pieceDanger(board, r, c, side); // 항상 <=0 이므로 그대로 누적
+  }
+  return total;
 }
 
 class GreedyAI2 {
@@ -831,52 +844,21 @@ class GreedyAI2 {
     }
     if(bestCapture) return bestCapture;
 
-    // 2) 위협받는 내 기물 중 danger가 가장 음수(가장 위험)인 것부터 처리
-    let worst=null, worstDanger=0;
-    for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
-      const p = board[r][c];
-      if(!p || color(p)!==side || p[1]==="K") continue;
-      const d = pieceDanger(board, r, c, side);
-      if(d<worstDanger) { worstDanger=d; worst={r,c}; }
-    }
-    if(worst) {
-      // 모든 합법수를 시뮬레이션해서, 그 기물(회피 시 이동한 새 위치 추적)의
-      // 결과 danger를 가장 크게 개선하는 수를 찾는다.
-      let bestMove=null, bestResultDanger=-Infinity, bestResultSafety=-Infinity;
-      for(const m of moves) {
-        const nb = applyMove(board, m);
-        const movedTarget = (m.from[0]===worst.r && m.from[1]===worst.c);
-        const nr = movedTarget?m.to[0]:worst.r;
-        const nc = movedTarget?m.to[1]:worst.c;
-        if(!nb[nr][nc]) continue; // 방어적 처리(이론상 발생하지 않음)
-        const resultDanger = pieceDanger(nb, nr, nc, side);
-        const safety = -totalHangingValueAfter(nb, side);
-        if(resultDanger>bestResultDanger || (resultDanger===bestResultDanger && safety>bestResultSafety)) {
-          bestResultDanger=resultDanger; bestMove=m; bestResultSafety=safety;
-        }
-      }
-      // 지금보다 실제로 개선되는 수가 있을 때만 채택 (개선이 없으면 3)번으로)
-      if(bestMove && bestResultDanger>worstDanger) return bestMove;
-    }
-
-    // 3) 안전한 수 (둔 뒤 아무것도 새로 걸리지 않는 수)
-    const safeMoves = [];
+    // 2) 이득 나는 포획이 없으면 — 포획이든 조용한 수든 상관없이,
+    //    "이 수를 둔 뒤 내 기물들이 잡혔을 때의 순이익"까지 반영한 위험도 총합
+    //    (totalDangerAfter, <=0, 0에 가까울수록 안전)이 가장 좋은 수를 고른다.
+    //    이 위험도 자체가 방어 여부를 감안한 손익(pieceDanger)의 합이라,
+    //    "그냥 안 걸리는가"만 보던 예전 방식과 달리, 움직여서 잡혔을 때
+    //    실제로 순손해인지 순이익인지가 조용한 수(포획이 아닌 수)에도 똑같이 반영된다.
+    let bestScore = -Infinity;
+    let candidates = [];
     for(const m of moves) {
       const nb = applyMove(board, m);
-      if(totalHangingValueAfter(nb, side)===0) safeMoves.push(m);
+      const score = totalDangerAfter(nb, side);
+      if(score>bestScore) { bestScore=score; candidates=[m]; }
+      else if(score===bestScore) candidates.push(m);
     }
-    if(safeMoves.length>0) {
-      return safeMoves[Math.floor(Math.random()*safeMoves.length)];
-    }
-
-    // 4) 안전한 수가 전혀 없으면, 그나마 걸리는 가치 총합이 가장 적은 수
-    let bestMove = moves[0], bestLoss = Infinity;
-    for(const m of moves) {
-      const nb = applyMove(board, m);
-      const loss = totalHangingValueAfter(nb, side);
-      if(loss<bestLoss) { bestLoss=loss; bestMove=m; }
-    }
-    return bestMove;
+    return candidates[Math.floor(Math.random()*candidates.length)];
   }
 
   learnFromGame(winner) {
