@@ -579,6 +579,192 @@ class ChessAI {
   }
 }
 
+// ============================================================
+// GREEDY AI — 탐색 없이 규칙 기반으로만 판단하는 AI
+//   1. 잡을 수 있는 상대 기물 중 "보호가 안 되고 있는(방어자 0명)" 기물이 있으면,
+//      그 중 가치가 가장 높은 걸 잡는다.
+//   2. 그런 기물이 없으면, 지금 위협받고 있는(공격은 받는데 방어자가 없는) 내 기물 중
+//      가장 가치 높은 걸 구하는 수(안전한 곳으로 이동/방어자 추가)를 찾는다.
+//   3. 그것도 없으면, 둔 뒤에 내 기물이 새로 걸리지 않는 "안전한 수" 중에서 고른다.
+//   4. 안전한 수가 하나도 없으면, 그나마 걸리는 가치 총합이 가장 적은 수를 고른다.
+// ============================================================
+
+// 기물 하나(pr,pc)가 규칙상 (tr,tc) 칸을 공격할 수 있는지 판정.
+// getLegalMoves와 달리 폰의 대각선 "공격 가능 여부"는 목표 칸이 비어있어도 계산한다
+// (기물 보호/공격 판정에는 실제 캡처 여부가 아니라 "공격 범위"가 필요하기 때문).
+function pieceAttacksSquare(board, pr, pc, tr, tc) {
+  const piece = board[pr][pc];
+  if(!piece) return false;
+  if(pr===tr && pc===tc) return false;
+  const side = color(piece);
+  const type = piece[1];
+  const dr = tr-pr, dc = tc-pc;
+
+  if(type==="N") return (Math.abs(dr)===2&&Math.abs(dc)===1)||(Math.abs(dr)===1&&Math.abs(dc)===2);
+  if(type==="K") return Math.max(Math.abs(dr),Math.abs(dc))===1;
+  if(type==="P") {
+    const dir = side==="w"?-1:1;
+    return dr===dir && Math.abs(dc)===1;
+  }
+  const isDiag = Math.abs(dr)===Math.abs(dc);
+  const isStraight = dr===0||dc===0;
+  if(type==="B" && !isDiag) return false;
+  if(type==="R" && !isStraight) return false;
+  if(type==="Q" && !isDiag && !isStraight) return false;
+
+  const stepR = dr===0?0:(dr>0?1:-1);
+  const stepC = dc===0?0:(dc>0?1:-1);
+  let cr=pr+stepR, cc=pc+stepC;
+  while(cr!==tr || cc!==tc) {
+    if(board[cr][cc]) return false; // 경로가 막혀있으면 공격 불가
+    cr+=stepR; cc+=stepC;
+  }
+  return true;
+}
+
+// (r,c) 칸을 bySide 진영이 몇 개의 기물로 공격/방어하고 있는지 개수
+function countAttackers(board, r, c, bySide) {
+  let count = 0;
+  for(let pr=0; pr<8; pr++) for(let pc=0; pc<8; pc++) {
+    const p = board[pr][pc];
+    if(!p || color(p)!==bySide) continue;
+    if(pieceAttacksSquare(board, pr, pc, r, c)) count++;
+  }
+  return count;
+}
+
+const GREEDY_PIECE_VAL = {P:1, N:3, B:3, R:5, Q:9, K:0};
+
+// 현재 보드에서, `side` 소유 기물들 중 "적에게 공격받는데 내 방어자가 0명"인
+// (=거저 잡히는) 기물 목록을 가치 내림차순으로 반환
+function findHangingPieces(board, side) {
+  const opp = side==="w"?"b":"w";
+  const hanging = [];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+    const p = board[r][c];
+    if(!p || color(p)!==side || p[1]==="K") continue;
+    const attackers = countAttackers(board, r, c, opp);
+    if(attackers===0) continue;
+    const defenders = countAttackers(board, r, c, side);
+    if(defenders===0) hanging.push({r, c, value: GREEDY_PIECE_VAL[p[1]]||0});
+  }
+  return hanging.sort((a,b)=>b.value-a.value);
+}
+
+// 이동 후 보드에서 `side` 소유 기물들이 "거저 잡히는" 상태의 가치 총합
+function totalHangingValueAfter(board, side) {
+  return findHangingPieces(board, side).reduce((s,p)=>s+p.value, 0);
+}
+
+class GreedyAI {
+  constructor(name) {
+    this.name = name;
+    this.type = "greedy";
+    this.trainCount = 0;
+    this.depth = 0; // 탐색을 하지 않으므로 사실상 미사용, 다른 AI와의 UI 호환용
+  }
+
+  chooseMove(board, side, lastMove, castleRights, explore=false) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) return null;
+    const opp = side==="w"?"b":"w";
+
+    // 1) 보호 안 되는 상대 기물 중 가치가 가장 높은 걸 잡는 수를 찾는다
+    let bestCapture = null, bestCaptureVal = -1;
+    for(const m of moves) {
+      let capturedType = null;
+      if(m.enPassant) capturedType = "P";
+      else if(board[m.to[0]][m.to[1]]) capturedType = board[m.to[0]][m.to[1]][1];
+      if(!capturedType) continue;
+
+      const capturedVal = GREEDY_PIECE_VAL[capturedType]||0;
+      // 잡히는 기물이 "이 수를 두기 전" 다른 상대 기물에게 방어받고 있는지 확인
+      // (잡히는 기물 자신은 방어자에서 자연히 제외됨 — countAttackers는 다른 칸의 기물만 센다)
+      const defenders = countAttackers(board, m.to[0], m.to[1], opp);
+      if(defenders>0) continue; // 보호되고 있으면 이 그리디 규칙에서는 후보 제외
+
+      if(capturedVal>bestCaptureVal) { bestCaptureVal=capturedVal; bestCapture=m; }
+    }
+    if(bestCapture) return bestCapture;
+
+    // 2) 지금 거저 잡히고 있는 내 기물 중 가장 비싼 걸 구하는 수를 찾는다
+    const hanging = findHangingPieces(board, side);
+    if(hanging.length>0) {
+      const target = hanging[0]; // 가장 가치 높은 위협받는 기물
+      let bestRescue = null, bestRescueSafety = -Infinity;
+      for(const m of moves) {
+        const movesThisPiece = m.from[0]===target.r && m.from[1]===target.c;
+        // 그 기물 자체를 옮기거나, 다른 기물로 그 자리를 방어하는 수 둘 다 후보
+        const nb = applyMove(board, m);
+        // 이동한 기물(또는 원래 자리, 방어자가 늘어난 경우)이 이제도 위협받는지 확인
+        let stillHanging;
+        if(movesThisPiece) {
+          stillHanging = countAttackers(nb, m.to[0], m.to[1], opp)>0 &&
+                         countAttackers(nb, m.to[0], m.to[1], side)===0;
+        } else {
+          // 원래 자리를 그대로 두고 방어자만 늘리는 경우: 그 기물이 아직 보드에 있다면(=이동X) 재확인
+          stillHanging = countAttackers(nb, target.r, target.c, opp)>0 &&
+                         countAttackers(nb, target.r, target.c, side)===0;
+        }
+        if(stillHanging) continue;
+        // 이 수를 둔 뒤 전체적으로 걸리는 가치 총합(작을수록 좋음)으로 안전도 비교
+        const safety = -totalHangingValueAfter(nb, side);
+        if(safety>bestRescueSafety) { bestRescueSafety=safety; bestRescue=m; }
+      }
+      if(bestRescue) return bestRescue;
+    }
+
+    // 3) 둔 뒤에 내 기물이 새로 걸리지 않는 "안전한 수"들을 모은다
+    const safeMoves = [];
+    for(const m of moves) {
+      const nb = applyMove(board, m);
+      if(totalHangingValueAfter(nb, side)===0) safeMoves.push(m);
+    }
+    if(safeMoves.length>0) {
+      return safeMoves[Math.floor(Math.random()*safeMoves.length)];
+    }
+
+    // 4) 안전한 수가 전혀 없으면, 그나마 걸리는 가치 총합이 가장 적은 수를 고른다
+    let bestMove = moves[0], bestLoss = Infinity;
+    for(const m of moves) {
+      const nb = applyMove(board, m);
+      const loss = totalHangingValueAfter(nb, side);
+      if(loss<bestLoss) { bestLoss=loss; bestMove=m; }
+    }
+    return bestMove;
+  }
+
+  // 그리디 AI는 규칙만으로 판단하고 따로 학습하지 않음 — 판 수 기록만 유지
+  learnFromGame(winner) {
+    this.trainCount++;
+  }
+
+  serialize() {
+    return { name:this.name, type:"greedy", trainCount:this.trainCount };
+  }
+
+  static deserialize(data) {
+    const ai = new GreedyAI(data.name);
+    ai.trainCount = data.trainCount||0;
+    return ai;
+  }
+}
+
+// AI 데이터(row/serialize 결과)로부터 알맞은 AI 인스턴스를 만들어주는 공용 헬퍼.
+// bots 저장/공유/리믹스 관련 여러 함수에서 중복되던 "qtable ? ... : ChessAI" 분기를 통일한다.
+function deserializeAI(data) {
+  if(data.type==="qtable") return QTableAI.deserialize(data);
+  if(data.type==="greedy") return GreedyAI.deserialize(data);
+  return ChessAI.deserialize(data);
+}
+
+// AI 타입별 표시용 라벨/색상 — 목록/관리/공유 화면 배지에서 공통으로 사용
+function aiTypeMeta(type) {
+  if(type==="qtable") return { label:"Q-Table", bg:"#1a3a5c", fg:"#6ab4f5" };
+  if(type==="greedy") return { label:"Greedy", bg:"#5c3a1a", fg:"#f5a86a" };
+  return { label:"Minimax", bg:"#3a1a5c", fg:"#c06af5" };
+}
+
 // ── 빠른 학습용 셀프플레이 ──
 function playGame(ai, maxMoves = 160) {
   if(ai.type==="qtable") return playGameQTable(ai, maxMoves);
@@ -756,8 +942,7 @@ async function loadBotsFromDB(userId) {
     const rows = await supaFetch(`/rest/v1/bots?user_id=eq.${userId}&select=*&order=updated_at.desc`);
     const result = {};
     for(const row of rows||[]) {
-      const ai = row.type==="qtable" ? QTableAI.deserialize({...row.data, name:row.name, type:"qtable", trainCount:row.train_count})
-        : ChessAI.deserialize({...row.data, name:row.name, type:"minimax", trainCount:row.train_count});
+      const ai = deserializeAI({...row.data, name:row.name, type:row.type, trainCount:row.train_count});
       ai._dbId = row.id;
       ai._isShared = row.is_shared||false;
       ai._sharedAt = row.shared_at;
@@ -821,9 +1006,7 @@ async function loadSharedBots() {
   try {
     const rows = await supaFetch(`/rest/v1/bots?is_shared=eq.true&select=id,name,type,train_count,data,user_id,shared_at&order=shared_at.desc&limit=50`);
     return (rows||[]).map(row => {
-      const ai = row.type==="qtable"
-        ? QTableAI.deserialize({...row.data, name:row.name, type:"qtable", trainCount:row.train_count})
-        : ChessAI.deserialize({...row.data, name:row.name, type:"minimax", trainCount:row.train_count});
+      const ai = deserializeAI({...row.data, name:row.name, type:row.type, trainCount:row.train_count});
       ai._dbId = row.id;
       ai._ownerId = row.user_id;
       ai._isShared = true;
@@ -835,9 +1018,7 @@ async function loadSharedBots() {
 
 // 리믹스: 공유된 봇을 내 것으로 복사
 async function remixBot(userId, sourceAi, newName) {
-  const ai = sourceAi.type==="qtable"
-    ? QTableAI.deserialize({...sourceAi.serialize(), name:newName})
-    : ChessAI.deserialize({...sourceAi.serialize(), name:newName});
+  const ai = deserializeAI({...sourceAi.serialize(), name:newName});
   ai.trainCount = sourceAi.trainCount;
   await saveBotToDB(userId, ai);
   return ai;
@@ -1125,8 +1306,7 @@ function loadBotsLocal() {
   try {
     const d = JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}"); //
     return Object.fromEntries(Object.entries(d).map(([k,v])=>{
-      if(v.type==="qtable") return [k, QTableAI.deserialize(v)];
-      return [k, ChessAI.deserialize(v)];
+      return [k, deserializeAI(v)];
     }));
   } catch(e) { return {}; }
 }
@@ -1652,9 +1832,9 @@ function ProfileScreen({ onBack, targetUsername, currentUserId, isDemo }) {
               <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",
                 background:"#2d1a0a",borderRadius:8}}>
                 <span style={{fontSize:11,padding:"2px 6px",borderRadius:8,fontWeight:"bold",
-                  background:b.type==="qtable"?"#1a3a5c":"#3a1a5c",
-                  color:b.type==="qtable"?"#6ab4f5":"#c06af5"}}>
-                  {b.type==="qtable"?"Q":"M"}
+                  background:aiTypeMeta(b.type).bg,
+                  color:aiTypeMeta(b.type).fg}}>
+                  {b.type==="qtable"?"Q":b.type==="greedy"?"G":"M"}
                 </span>
                 <span style={{color:"#c9a96e",flex:1,fontSize:14}}>{b.name}</span>
                 <span style={{color:"#7c6040",fontSize:12}}>학습 {b.train_count}회</span>
@@ -2624,10 +2804,10 @@ function LoadScreen({ onBack, onSelect, bots }) {
                 <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
                   <span style={{
                     fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
-                    background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
-                    color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
-                    border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
-                  }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+                    background:aiTypeMeta(ai.type).bg,
+                    color:aiTypeMeta(ai.type).fg,
+                    border:`1px solid ${aiTypeMeta(ai.type).fg}44`
+                  }}>{aiTypeMeta(ai.type).label}</span>
                   {ai._isShared&&(
                     <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
                       background:"#1a3a2c",color:"#6af5b0",border:"1px solid #6af5b044"}}>🌐 공유중</span>
@@ -2666,6 +2846,14 @@ function NewAIScreen({ onBack, onCreate }) {
       icon: "📊",
       desc: "경험을 표로 기억하며 학습. 많이 학습할수록 익숙한 국면에서 강해짐.",
       pros: ["학습 데이터가 명시적으로 쌓임", "특정 패턴에 특화 가능", "단순하고 직관적"],
+    },
+    greedy: {
+      title: "Greedy",
+      color: "#f5a86a",
+      bg: "#5c3a1a",
+      icon: "🎯",
+      desc: "탐색 없이 규칙만으로 판단. 보호 안 된 상대 기물 중 가장 비싼 걸 잡고, 내 기물이 걸리지 않게 안전한 수를 고름.",
+      pros: ["학습 없이도 즉시 합리적", "계산이 가벼워 매우 빠름", "기물 손실을 잘 피함"],
     },
   };
 
@@ -2856,10 +3044,10 @@ function AIManageScreen({ onBack, bots, isDemo, onRefresh, userId }) {
                     <span style={{color:"#c9a96e",fontSize:16,fontWeight:"bold",flex:1}}>{n}</span>
                   )}
                   <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
-                    background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
-                    color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
-                    border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
-                  }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+                    background:aiTypeMeta(ai.type).bg,
+                    color:aiTypeMeta(ai.type).fg,
+                    border:`1px solid ${aiTypeMeta(ai.type).fg}44`
+                  }}>{aiTypeMeta(ai.type).label}</span>
                   {ai._isShared&&<span style={{fontSize:10,padding:"2px 7px",borderRadius:10,
                     background:"#1a3a2c",color:"#6af5b0",border:"1px solid #6af5b044",fontWeight:"bold"}}>🌐 공유중</span>}
                 </div>
@@ -2928,9 +3116,7 @@ function SharedAIScreen({ onBack, onSelect, currentUserId, isDemo }) {
     try {
       if(isDemo) {
         // demo: save locally
-        const newAi = ai.type==="qtable"
-          ? QTableAI.deserialize({...ai.serialize(), name:name.trim()})
-          : ChessAI.deserialize({...ai.serialize(), name:name.trim()});
+        const newAi = deserializeAI({...ai.serialize(), name:name.trim()});
         const local = loadBotsLocal();
         local[name.trim()] = newAi;
         saveBotsLocal(local);
@@ -2961,10 +3147,10 @@ function SharedAIScreen({ onBack, onSelect, currentUserId, isDemo }) {
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
                 <span style={{color:"#c9a96e",fontSize:15,fontWeight:"bold",flex:1}}>{ai.name}</span>
                 <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,fontWeight:"bold",
-                  background:ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
-                  color:ai.type==="qtable"?"#6ab4f5":"#c06af5",
-                  border:`1px solid ${ai.type==="qtable"?"#6ab4f544":"#c06af544"}`
-                }}>{ai.type==="qtable"?"Q-Table":"Minimax"}</span>
+                  background:aiTypeMeta(ai.type).bg,
+                  color:aiTypeMeta(ai.type).fg,
+                  border:`1px solid ${aiTypeMeta(ai.type).fg}44`
+                }}>{aiTypeMeta(ai.type).label}</span>
               </div>
               <div style={{display:"flex",gap:16,marginBottom:12,flexWrap:"wrap"}}>
                 <span style={{color:"#7c6040",fontSize:12}}>학습 <span style={{color:"#c9a96e"}}>{ai.trainCount}</span>회</span>
@@ -3013,10 +3199,10 @@ function AIDashboard({ ai, onSave, onBack, theme="wood", isDemo=false, onToggleS
         <div style={{display:"inline-flex",alignItems:"center",gap:8,marginBottom:12}}>
           <span style={{
             fontSize:11,padding:"3px 10px",borderRadius:10,fontWeight:"bold",
-            background: ai.type==="qtable"?"#1a3a5c":"#3a1a5c",
-            color: ai.type==="qtable"?"#6ab4f5":"#c06af5",
-            border: `1px solid ${ai.type==="qtable"?"#6ab4f566":"#c06af566"}`
-          }}>{ai.type==="qtable"?"📊 Q-Table":"🧠 Minimax + Alpha-Beta"}</span>
+            background: aiTypeMeta(ai.type).bg,
+            color: aiTypeMeta(ai.type).fg,
+            border: `1px solid ${aiTypeMeta(ai.type).fg}66`
+          }}>{ai.type==="qtable"?"📊 Q-Table":ai.type==="greedy"?"🎯 Greedy":"🧠 Minimax + Alpha-Beta"}</span>
           <span style={{color:"#7c6040",fontSize:13}}>학습 {trainCount}회</span>
         </div>
         {ai.type==="minimax"&&(
@@ -3047,10 +3233,17 @@ function AIDashboard({ ai, onSave, onBack, theme="wood", isDemo=false, onToggleS
             {" · "}탐색율(ε): {(ai.epsilon*100).toFixed(0)}%
           </p>
         )}
+        {ai.type==="greedy"&&(
+          <p style={{color:"#7c6040",fontSize:11,marginBottom:20}}>
+            탐색 없이 규칙만으로 판단 · 보호 안 된 기물 최우선 포획 · 내 기물 안전 우선
+          </p>
+        )}
         <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
-          <button onClick={()=>setMode("train")} style={btnStyle("#1a3a5c","#6ab4f5")}>
-            ⚡ AI vs. AI (관전 X) — 빠른 학습
-          </button>
+          {ai.type!=="greedy"&&(
+            <button onClick={()=>setMode("train")} style={btnStyle("#1a3a5c","#6ab4f5")}>
+              ⚡ AI vs. AI (관전 X) — 빠른 학습
+            </button>
+          )}
           <button onClick={()=>setMode("watch")} style={btnStyle("#3a1a5c","#c06af5")}>
             👁 AI vs. AI (관전) — 관전 모드
           </button>
@@ -3222,7 +3415,17 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate, theme="wood" }) {
       const lm=lmRef.current;
       const moves=getAllValidMoves(b,s,lm,cr);
       if(!moves.length){
-        // game over, restart
+        // 체크메이트/스테일메이트로 게임 종료.
+        // 예전 코드는 여기서 메시지/상태 갱신도, ai.learnFromGame 호출도 없이
+        // 그냥 1.5초 조용히 기다렸다가 리셋해서, 결론(승패 메시지)이 화면에 전혀 안 보이고
+        // Q-Table AI가 이 게임 결과를 학습하지도 못하던 버그가 있었음.
+        const inChk = isInCheck(b, s);
+        const winner = inChk ? (s==="w"?"b":"w") : null;
+        ai.learnFromGame(winner);
+        setStatus(winner?`checkmate_${winner}`:"stalemate");
+        setMessage(winner?(winner==="w"?"백(White) 승리!":"흑(Black) 승리!"):"스테일메이트 (무승부)");
+        setTrainDisplay(ai.trainCount);
+        onTrainUpdate();
         setTimeout(()=>{
           if(!runRef.current) return;
           setBoard(INIT_BOARD());
@@ -3275,6 +3478,21 @@ function GameScreen({ ai, mode, aiSide, onBack, onTrainUpdate, theme="wood" }) {
     const cr=crRef.current;
     const lm=lmRef.current;
     const timeout=setTimeout(()=>{
+      // AI 턴인데 둘 수 있는 수가 없는 경우(체크메이트/스테일메이트)를 먼저 확인.
+      // 예전 코드는 chooseMove가 null을 반환하면 아무 상태 변경 없이 그냥 멈춰서,
+      // "AI가 생각 중..."인 채로 화면이 얼어붙고 게임이 끝나지 않는 버그가 있었음.
+      const movesForAI = getAllValidMoves(b, aiSide, lm, cr);
+      if(!movesForAI.length){
+        const inChk = isInCheck(b, aiSide);
+        const winner = inChk ? (aiSide==="w"?"b":"w") : null;
+        if(ai) ai.learnFromGame(winner);
+        setStatus(winner?`checkmate_${winner}`:"stalemate");
+        setMessage(winner?(winner==="w"?"백(White) 승리!":"흑(Black) 승리!"):"스테일메이트 (무승부)");
+        setTrainDisplay(ai.trainCount);
+        onTrainUpdate();
+        aiTurnRef.current=false;
+        return;
+      }
       const move=ai.chooseMove(b,aiSide,lm,cr,false);
       if(!move){aiTurnRef.current=false;return;}
       applyMoveState(b,move,aiSide,cr,lm,true);
@@ -3520,7 +3738,9 @@ function AIRoot({ user, profile, onBack, theme }) {
   const handleNew = (name, engineType="minimax") => {
     const existing = bots[name];
     if(existing){ setCurrentAI(existing); setScreen("dashboard"); return; }
-    const ai = engineType==="qtable" ? new QTableAI(name) : new ChessAI(name);
+    const ai = engineType==="qtable" ? new QTableAI(name)
+      : engineType==="greedy" ? new GreedyAI(name)
+      : new ChessAI(name);
     setCurrentAI(ai);
     setScreen("dashboard");
   };
