@@ -750,11 +750,156 @@ class GreedyAI {
   }
 }
 
+// ============================================================
+// GREEDY 2 — 그리디에 두 가지 규칙을 더함
+//   1. 포획 판단: 방어되고 있는 기물이라도, 교환 손익
+//      (잡는 기물 값 - (되잡힐 경우 잃는 내 기물 값))이 순이익이면 잡는다.
+//      (방어가 없으면 그리디와 동일하게 그냥 이득 = 잡는 기물 값)
+//   2. 위협 대응: 위협받는 내 기물마다
+//      danger = min((공격 기물 값) - (당하는 기물 값), 0) 로 위험도를 매기고
+//      (방어자가 아예 없으면 danger = -내 기물 값, 즉 전부 손해),
+//      가장 위험한(danger가 가장 음수인) 기물부터, 모든 합법수를 시뮬레이션해서
+//      그 기물의 danger를 가장 크게 개선시키는 수를 고른다.
+//      — 그 기물을 옮기는 것(회피), 방어자를 붙이는 것, 공격 기물을 잡거나
+//        막는 것을 전부 "결과 danger가 얼마나 좋아지는가"라는 같은 기준으로 비교하므로
+//        "보호할지 피할지"를 별도로 분기하지 않아도 자연스럽게 최선의 방법이 선택된다.
+// ============================================================
+
+// (r,c) 칸을 bySide 진영이 공격 중인 기물들의 가치 목록
+function attackerValues(board, r, c, bySide) {
+  const vals = [];
+  for(let pr=0; pr<8; pr++) for(let pc=0; pc<8; pc++) {
+    const p = board[pr][pc];
+    if(!p || color(p)!==bySide) continue;
+    if(pieceAttacksSquare(board, pr, pc, r, c)) vals.push(GREEDY_PIECE_VAL[p[1]]||0);
+  }
+  return vals;
+}
+
+// (r,c)에 있는 side 소유 기물이 지금 얼마나 위험한지 계산.
+// - 방어자가 0명: 잡히면 그대로 전부 손해 → -기물 값
+// - 방어자가 1명 이상("보호 가능"): 사용자가 지정한 공식 그대로
+//     min((공격 기물 중 가장 싼 값) - (당하는 기물 값), 0)
+//     → 0이면 "설령 잡혀도 되잡아서 손해가 없거나 오히려 이득" (실질적 위험 없음)
+//     → 음수면 그 절댓값만큼 실제 손해 위험이 있다는 뜻 (더 음수일수록 더 위험)
+function pieceDanger(board, r, c, side) {
+  const p = board[r][c];
+  if(!p) return 0;
+  const opp = side==="w"?"b":"w";
+  const atkVals = attackerValues(board, r, c, opp);
+  if(atkVals.length===0) return 0; // 공격받지 않음
+  const pieceVal = GREEDY_PIECE_VAL[p[1]]||0;
+  const defenders = countAttackers(board, r, c, side);
+  if(defenders===0) return -pieceVal; // 보호 불가 — 잡히면 전부 손해
+  const cheapestAttacker = Math.min(...atkVals);
+  return Math.min(cheapestAttacker - pieceVal, 0);
+}
+
+class GreedyAI2 {
+  constructor(name) {
+    this.name = name;
+    this.type = "greedy2";
+    this.trainCount = 0;
+    this.depth = 0; // 탐색을 하지 않으므로 사실상 미사용, 다른 AI와의 UI 호환용
+  }
+
+  chooseMove(board, side, lastMove, castleRights, explore=false) {
+    const moves = getAllValidMoves(board, side, lastMove, castleRights);
+    if(!moves.length) return null;
+    const opp = side==="w"?"b":"w";
+
+    // 1) 이득이 되는 포획 — 방어가 있어도 순이익이면 잡는다
+    let bestCapture=null, bestGain=0, bestCaptureSafety=-Infinity;
+    for(const m of moves) {
+      let capturedType=null;
+      if(m.enPassant) capturedType="P";
+      else if(board[m.to[0]][m.to[1]]) capturedType=board[m.to[0]][m.to[1]][1];
+      if(!capturedType) continue;
+
+      const capturedVal = GREEDY_PIECE_VAL[capturedType]||0;
+      const movingVal = GREEDY_PIECE_VAL[board[m.from[0]][m.from[1]][1]]||0;
+      const defenders = countAttackers(board, m.to[0], m.to[1], opp);
+      // 방어가 없으면 그냥 이득 = 잡는 값, 있으면 되잡힐 걸 감안한 순이익
+      const gain = defenders>0 ? (capturedVal-movingVal) : capturedVal;
+      if(gain<=0) continue; // "이득이 되는" 경우만 채택 — 손해/제자리 교환은 제외
+
+      const nb = applyMove(board, m);
+      const safety = -totalHangingValueAfter(nb, side); // 동점이면 더 안전한 쪽 우선
+      if(gain>bestGain || (gain===bestGain && safety>bestCaptureSafety)) {
+        bestGain=gain; bestCapture=m; bestCaptureSafety=safety;
+      }
+    }
+    if(bestCapture) return bestCapture;
+
+    // 2) 위협받는 내 기물 중 danger가 가장 음수(가장 위험)인 것부터 처리
+    let worst=null, worstDanger=0;
+    for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+      const p = board[r][c];
+      if(!p || color(p)!==side || p[1]==="K") continue;
+      const d = pieceDanger(board, r, c, side);
+      if(d<worstDanger) { worstDanger=d; worst={r,c}; }
+    }
+    if(worst) {
+      // 모든 합법수를 시뮬레이션해서, 그 기물(회피 시 이동한 새 위치 추적)의
+      // 결과 danger를 가장 크게 개선하는 수를 찾는다.
+      let bestMove=null, bestResultDanger=-Infinity, bestResultSafety=-Infinity;
+      for(const m of moves) {
+        const nb = applyMove(board, m);
+        const movedTarget = (m.from[0]===worst.r && m.from[1]===worst.c);
+        const nr = movedTarget?m.to[0]:worst.r;
+        const nc = movedTarget?m.to[1]:worst.c;
+        if(!nb[nr][nc]) continue; // 방어적 처리(이론상 발생하지 않음)
+        const resultDanger = pieceDanger(nb, nr, nc, side);
+        const safety = -totalHangingValueAfter(nb, side);
+        if(resultDanger>bestResultDanger || (resultDanger===bestResultDanger && safety>bestResultSafety)) {
+          bestResultDanger=resultDanger; bestMove=m; bestResultSafety=safety;
+        }
+      }
+      // 지금보다 실제로 개선되는 수가 있을 때만 채택 (개선이 없으면 3)번으로)
+      if(bestMove && bestResultDanger>worstDanger) return bestMove;
+    }
+
+    // 3) 안전한 수 (둔 뒤 아무것도 새로 걸리지 않는 수)
+    const safeMoves = [];
+    for(const m of moves) {
+      const nb = applyMove(board, m);
+      if(totalHangingValueAfter(nb, side)===0) safeMoves.push(m);
+    }
+    if(safeMoves.length>0) {
+      return safeMoves[Math.floor(Math.random()*safeMoves.length)];
+    }
+
+    // 4) 안전한 수가 전혀 없으면, 그나마 걸리는 가치 총합이 가장 적은 수
+    let bestMove = moves[0], bestLoss = Infinity;
+    for(const m of moves) {
+      const nb = applyMove(board, m);
+      const loss = totalHangingValueAfter(nb, side);
+      if(loss<bestLoss) { bestLoss=loss; bestMove=m; }
+    }
+    return bestMove;
+  }
+
+  learnFromGame(winner) {
+    this.trainCount++;
+  }
+
+  serialize() {
+    return { name:this.name, type:"greedy2", trainCount:this.trainCount };
+  }
+
+  static deserialize(data) {
+    const ai = new GreedyAI2(data.name);
+    ai.trainCount = data.trainCount||0;
+    return ai;
+  }
+}
+
 // AI 데이터(row/serialize 결과)로부터 알맞은 AI 인스턴스를 만들어주는 공용 헬퍼.
 // bots 저장/공유/리믹스 관련 여러 함수에서 중복되던 "qtable ? ... : ChessAI" 분기를 통일한다.
 function deserializeAI(data) {
   if(data.type==="qtable") return QTableAI.deserialize(data);
   if(data.type==="greedy") return GreedyAI.deserialize(data);
+  if(data.type==="greedy2") return GreedyAI2.deserialize(data);
   return ChessAI.deserialize(data);
 }
 
@@ -762,6 +907,7 @@ function deserializeAI(data) {
 function aiTypeMeta(type) {
   if(type==="qtable") return { label:"Q-Table", bg:"#1a3a5c", fg:"#6ab4f5" };
   if(type==="greedy") return { label:"Greedy", bg:"#5c3a1a", fg:"#f5a86a" };
+  if(type==="greedy2") return { label:"Greedy 2", bg:"#1a5c3a", fg:"#6af5a8" };
   return { label:"Minimax", bg:"#3a1a5c", fg:"#c06af5" };
 }
 
@@ -2855,6 +3001,14 @@ function NewAIScreen({ onBack, onCreate }) {
       desc: "탐색 없이 규칙만으로 판단. 보호 안 된 상대 기물 중 가장 비싼 걸 잡고, 내 기물이 걸리지 않게 안전한 수를 고름.",
       pros: ["학습 없이도 즉시 합리적", "계산이 가벼워 매우 빠름", "기물 손실을 잘 피함"],
     },
+    greedy2: {
+      title: "Greedy 2",
+      color: "#6af5a8",
+      bg: "#1a5c3a",
+      icon: "⚖️",
+      desc: "그리디 + 교환 손익 계산. 방어된 기물도 순이익이면 잡고, 위협받는 기물은 손해를 최소화하는 방향으로 대응.",
+      pros: ["유리한 교환(트레이드)도 인식", "위협 대응이 더 정교함", "여전히 탐색 없이 즉시 판단"],
+    },
   };
 
   if(step==="name") return (
@@ -2911,17 +3065,17 @@ function NewAIScreen({ onBack, onCreate }) {
       <div style={{
         padding:"40px 48px",background:"#1a0e06",
         border:"2px solid #7c4a1e",borderRadius:12,
-        boxShadow:"0 0 60px #0009",width:"90%",maxWidth:560,textAlign:"center"
+        boxShadow:"0 0 60px #0009",width:"90%",maxWidth:760,textAlign:"center"
       }}>
         <h2 style={{color:"#c9a96e",fontSize:22,marginBottom:4}}>AI 엔진 선택</h2>
         <p style={{color:"#7c6040",fontSize:13,marginBottom:28}}>
           <span style={{color:"#c9a96e"}}>{name}</span> 의 학습 방식을 선택하세요
         </p>
-        <div style={{display:"flex",gap:16,marginBottom:28}}>
+        <div style={{display:"flex",flexWrap:"wrap",gap:16,marginBottom:28}}>
           {Object.entries(engineInfo).map(([key, info])=>(
             <div key={key} onClick={()=>onCreate(name.trim(), key)}
               style={{
-                flex:1,padding:"24px 16px",
+                flex:"1 1 280px",padding:"24px 16px",
                 background:info.bg,
                 border:`2px solid ${info.color}44`,
                 borderRadius:10,cursor:"pointer",
@@ -3202,7 +3356,7 @@ function AIDashboard({ ai, onSave, onBack, theme="wood", isDemo=false, onToggleS
             background: aiTypeMeta(ai.type).bg,
             color: aiTypeMeta(ai.type).fg,
             border: `1px solid ${aiTypeMeta(ai.type).fg}66`
-          }}>{ai.type==="qtable"?"📊 Q-Table":ai.type==="greedy"?"🎯 Greedy":"🧠 Minimax + Alpha-Beta"}</span>
+          }}>{ai.type==="qtable"?"📊 Q-Table":ai.type==="greedy"?"🎯 Greedy":ai.type==="greedy2"?"⚖️ Greedy 2":"🧠 Minimax + Alpha-Beta"}</span>
           <span style={{color:"#7c6040",fontSize:13}}>학습 {trainCount}회</span>
         </div>
         {ai.type==="minimax"&&(
@@ -3238,8 +3392,13 @@ function AIDashboard({ ai, onSave, onBack, theme="wood", isDemo=false, onToggleS
             탐색 없이 규칙만으로 판단 · 보호 안 된 기물 최우선 포획 · 내 기물 안전 우선
           </p>
         )}
+        {ai.type==="greedy2"&&(
+          <p style={{color:"#7c6040",fontSize:11,marginBottom:20}}>
+            그리디 + 교환 손익 계산 · 방어된 기물도 순이익이면 포획 · 위협받는 기물은 손해 최소화로 대응
+          </p>
+        )}
         <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
-          {ai.type!=="greedy"&&(
+          {ai.type!=="greedy"&&ai.type!=="greedy2"&&(
             <button onClick={()=>setMode("train")} style={btnStyle("#1a3a5c","#6ab4f5")}>
               ⚡ AI vs. AI (관전 X) — 빠른 학습
             </button>
@@ -3740,6 +3899,7 @@ function AIRoot({ user, profile, onBack, theme }) {
     if(existing){ setCurrentAI(existing); setScreen("dashboard"); return; }
     const ai = engineType==="qtable" ? new QTableAI(name)
       : engineType==="greedy" ? new GreedyAI(name)
+      : engineType==="greedy2" ? new GreedyAI2(name)
       : new ChessAI(name);
     setCurrentAI(ai);
     setScreen("dashboard");
